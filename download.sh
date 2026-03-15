@@ -1,0 +1,574 @@
+#!/usr/bin/env bash
+#
+# download.sh — Download all software for offline installation in an air-gapped environment
+#
+# Run this on an internet-connected machine. It downloads Ollama, a Qwen 3.5
+# model, Python, and Aider, then packages everything into a directory ready
+# to copy onto a USB drive.
+#
+# Usage:
+#   ./download.sh                              # Default: Windows 11, 9b model
+#   ./download.sh --model 27b                  # Specify model size
+#   ./download.sh --os linux                   # Target OS: windows|linux
+#   ./download.sh --arch arm64                 # Target arch: amd64|arm64
+#   ./download.sh --output /path/to/usb        # Output directory
+#
+# After download, copy the output directory to USB and run the install script
+# on the target machine.
+#
+# Requires: curl, ollama (auto-installed if missing)
+
+set -euo pipefail
+
+# ─── Defaults ──────────────────────────────────────────────────────────────────
+
+MODEL_SIZE="9b"
+TARGET_OS="windows"
+TARGET_ARCH="amd64"
+OUTPUT_DIR=""
+PYTHON_VERSION="3.12.9"
+
+# ─── Colors ────────────────────────────────────────────────────────────────────
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+info()  { echo -e "${BLUE}[INFO]${NC} $*"; }
+ok()    { echo -e "${GREEN}[OK]${NC}   $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
+error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+
+# ─── Parse arguments ──────────────────────────────────────────────────────────
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --model)
+            [[ $# -ge 2 ]] || error "--model requires a size argument (e.g., --model 9b)"
+            MODEL_SIZE="$2"
+            shift 2
+            ;;
+        --os)
+            [[ $# -ge 2 ]] || error "--os requires an argument (windows|linux)"
+            TARGET_OS="$2"
+            shift 2
+            ;;
+        --arch)
+            [[ $# -ge 2 ]] || error "--arch requires an argument (amd64|arm64)"
+            TARGET_ARCH="$2"
+            shift 2
+            ;;
+        --output)
+            [[ $# -ge 2 ]] || error "--output requires a path argument"
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --help|-h)
+            head -19 "$0" | tail -15
+            exit 0
+            ;;
+        *)
+            error "Unknown option: $1. Use --help for usage."
+            ;;
+    esac
+done
+
+# Validate
+case "$MODEL_SIZE" in
+    0.6b|1.5b|4b|9b|27b|72b) ;;
+    *) error "Invalid model size: $MODEL_SIZE. Choose from: 0.6b, 1.5b, 4b, 9b, 27b, 72b" ;;
+esac
+case "$TARGET_OS" in
+    windows|linux) ;;
+    *) error "Invalid target OS: $TARGET_OS. Choose from: windows, linux" ;;
+esac
+case "$TARGET_ARCH" in
+    amd64|arm64) ;;
+    *) error "Invalid target arch: $TARGET_ARCH. Choose from: amd64, arm64" ;;
+esac
+
+MODEL_TAG="qwen3.5:${MODEL_SIZE}"
+if [[ -z "$OUTPUT_DIR" ]]; then
+    OUTPUT_DIR="./airgap-bundle-${TARGET_OS}-${TARGET_ARCH}-qwen3.5-${MODEL_SIZE}"
+fi
+
+echo ""
+echo "============================================"
+echo " Air-Gap Bundle Downloader"
+echo "============================================"
+echo ""
+info "Target OS:    ${TARGET_OS}"
+info "Target Arch:  ${TARGET_ARCH}"
+info "Model:        ${MODEL_TAG}"
+info "Output:       ${OUTPUT_DIR}"
+echo ""
+
+# ─── Create output structure ──────────────────────────────────────────────────
+
+mkdir -p "${OUTPUT_DIR}/ollama"
+mkdir -p "${OUTPUT_DIR}/model"
+mkdir -p "${OUTPUT_DIR}/python"
+mkdir -p "${OUTPUT_DIR}/aider"
+
+# ─── Step 1: Download Ollama ─────────────────────────────────────────────────
+
+download_ollama() {
+    info "Step 1/5: Downloading Ollama for ${TARGET_OS}/${TARGET_ARCH}..."
+
+    case "${TARGET_OS}" in
+        windows)
+            OLLAMA_URL="https://ollama.com/download/OllamaSetup.exe"
+            OLLAMA_FILE="${OUTPUT_DIR}/ollama/OllamaSetup.exe"
+            ;;
+        linux)
+            OLLAMA_URL="https://ollama.com/download/ollama-linux-${TARGET_ARCH}"
+            OLLAMA_FILE="${OUTPUT_DIR}/ollama/ollama"
+            ;;
+    esac
+
+    if [[ -f "$OLLAMA_FILE" ]]; then
+        ok "Ollama already downloaded"
+        return 0
+    fi
+
+    curl -fSL "$OLLAMA_URL" -o "$OLLAMA_FILE"
+    if [[ "$TARGET_OS" == "linux" ]]; then
+        chmod +x "$OLLAMA_FILE"
+    fi
+    ok "Ollama downloaded ($(du -h "$OLLAMA_FILE" | cut -f1))"
+}
+
+# ─── Step 2: Download model ──────────────────────────────────────────────────
+
+download_model() {
+    info "Step 2/5: Downloading model ${MODEL_TAG}... (this may take a long time)"
+
+    # We need ollama running locally to pull the model
+    ensure_local_ollama
+
+    # Check if model already pulled
+    if ollama list 2>/dev/null | grep -q "qwen3.5:${MODEL_SIZE}"; then
+        info "Model already pulled locally"
+    else
+        ollama pull "$MODEL_TAG"
+    fi
+
+    # Copy model blobs to bundle
+    # Ollama stores models in ~/.ollama/models/
+    OLLAMA_MODELS="${OLLAMA_MODELS:-${HOME}/.ollama/models}"
+    if [[ -d "$OLLAMA_MODELS" ]]; then
+        info "Copying model files to bundle..."
+        rsync -a --info=progress2 "$OLLAMA_MODELS/" "${OUTPUT_DIR}/model/"
+        ok "Model files copied ($(du -sh "${OUTPUT_DIR}/model/" | cut -f1))"
+    else
+        error "Ollama models directory not found at ${OLLAMA_MODELS}"
+    fi
+}
+
+ensure_local_ollama() {
+    if command -v ollama &>/dev/null; then
+        ok "Local ollama available"
+    else
+        info "Installing ollama locally for model download..."
+        curl -fsSL https://ollama.com/install.sh | sh
+    fi
+
+    # Ensure server is running
+    if ! curl -sf "http://127.0.0.1:11434/api/tags" &>/dev/null; then
+        info "Starting local ollama server..."
+        ollama serve &>/dev/null &
+        for i in $(seq 1 30); do
+            if curl -sf "http://127.0.0.1:11434/api/tags" &>/dev/null; then
+                break
+            fi
+            if [[ $i -eq 30 ]]; then
+                error "Ollama server failed to start"
+            fi
+            sleep 1
+        done
+    fi
+    ok "Local ollama server running"
+}
+
+# ─── Step 3: Download Python ─────────────────────────────────────────────────
+
+download_python() {
+    info "Step 3/5: Downloading Python ${PYTHON_VERSION} for ${TARGET_OS}/${TARGET_ARCH}..."
+
+    case "${TARGET_OS}" in
+        windows)
+            case "${TARGET_ARCH}" in
+                amd64) PY_ARCH="amd64" ;;
+                arm64) PY_ARCH="arm64" ;;
+            esac
+            PY_URL="https://www.python.org/ftp/python/${PYTHON_VERSION}/python-${PYTHON_VERSION}-${PY_ARCH}.exe"
+            PY_FILE="${OUTPUT_DIR}/python/python-${PYTHON_VERSION}-${PY_ARCH}.exe"
+            ;;
+        linux)
+            # For Linux, we note that Python is typically pre-installed
+            info "Linux targets typically have Python pre-installed. Skipping Python download."
+            info "If needed, install via system package manager before running the offline installer."
+            ok "Python download skipped (Linux)"
+            return 0
+            ;;
+    esac
+
+    if [[ -f "$PY_FILE" ]]; then
+        ok "Python installer already downloaded"
+        return 0
+    fi
+
+    curl -fSL "$PY_URL" -o "$PY_FILE"
+    ok "Python installer downloaded ($(du -h "$PY_FILE" | cut -f1))"
+}
+
+# ─── Step 4: Download Aider wheels ───────────────────────────────────────────
+
+download_aider() {
+    info "Step 4/5: Downloading Aider and dependencies as wheels..."
+
+    # pip download can cross-compile for target platform
+    case "${TARGET_OS}" in
+        windows) PIP_PLATFORM="win_${TARGET_ARCH}" ;;
+        linux)   PIP_PLATFORM="manylinux2014_$(uname -m)" ;;
+    esac
+
+    # Download wheels for target platform
+    # Use --python-version to match target Python
+    PY_SHORT=$(echo "$PYTHON_VERSION" | cut -d. -f1-2 | tr -d '.')
+
+    python3 -m pip download \
+        --dest "${OUTPUT_DIR}/aider/" \
+        --platform "$PIP_PLATFORM" \
+        --python-version "$PY_SHORT" \
+        --only-binary=:all: \
+        aider-chat 2>&1 | tail -5
+
+    # Some pure-Python deps may fail with --only-binary, download them separately
+    python3 -m pip download \
+        --dest "${OUTPUT_DIR}/aider/" \
+        --no-binary=:none: \
+        aider-chat 2>&1 | tail -5
+
+    # Deduplicate: if both .whl and .tar.gz exist for same package, keep .whl
+    info "Deduplicating wheels..."
+    WHEEL_COUNT=$(find "${OUTPUT_DIR}/aider/" -name "*.whl" | wc -l)
+    TOTAL_COUNT=$(find "${OUTPUT_DIR}/aider/" -type f | wc -l)
+    ok "Aider wheels downloaded (${WHEEL_COUNT} wheels, ${TOTAL_COUNT} total files, $(du -sh "${OUTPUT_DIR}/aider/" | cut -f1))"
+}
+
+# ─── Step 5: Generate offline install script ─────────────────────────────────
+
+generate_install_script() {
+    info "Step 5/5: Generating offline install script..."
+
+    case "${TARGET_OS}" in
+        windows)
+            generate_windows_installer
+            ;;
+        linux)
+            generate_linux_installer
+            ;;
+    esac
+}
+
+generate_windows_installer() {
+    cat > "${OUTPUT_DIR}/install-offline.ps1" << 'PSEOF'
+#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+    Offline installer for local AI coding environment (Ollama + Qwen 3.5 + Aider)
+.DESCRIPTION
+    Run this script from the USB drive / copied bundle directory.
+    Must be run as Administrator for Ollama installation.
+#>
+
+param(
+    [switch]$SkipPython,
+    [switch]$SkipOllama,
+    [switch]$SkipAider,
+    [switch]$SkipModel
+)
+
+$ErrorActionPreference = "Stop"
+$BundleDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+Write-Host ""
+Write-Host "============================================" -ForegroundColor Cyan
+Write-Host " Offline AI Coding Environment Setup"        -ForegroundColor Cyan
+Write-Host "============================================" -ForegroundColor Cyan
+Write-Host ""
+
+# ── Step 1: Install Python ──────────────────────────────────────────────────
+if (-not $SkipPython) {
+    $pyInstaller = Get-ChildItem "$BundleDir\python\python-*.exe" | Select-Object -First 1
+    if ($pyInstaller) {
+        # Check if Python is already installed
+        $existingPython = Get-Command python -ErrorAction SilentlyContinue
+        if ($existingPython) {
+            $pyVer = & python --version 2>&1
+            Write-Host "[OK]   Python already installed ($pyVer)" -ForegroundColor Green
+        } else {
+            Write-Host "[INFO] Installing Python from $($pyInstaller.Name)..." -ForegroundColor Blue
+            # Silent install: add to PATH, install for all users
+            Start-Process -Wait -FilePath $pyInstaller.FullName -ArgumentList `
+                "/quiet", "InstallAllUsers=1", "PrependPath=1", "Include_pip=1"
+            Write-Host "[OK]   Python installed" -ForegroundColor Green
+            # Refresh PATH
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + `
+                        [System.Environment]::GetEnvironmentVariable("Path", "User")
+        }
+    } else {
+        Write-Host "[WARN] No Python installer found in bundle/python/" -ForegroundColor Yellow
+    }
+}
+
+# ── Step 2: Install Ollama ──────────────────────────────────────────────────
+if (-not $SkipOllama) {
+    $ollamaInstaller = Get-ChildItem "$BundleDir\ollama\OllamaSetup.exe" -ErrorAction SilentlyContinue
+    if ($ollamaInstaller) {
+        $existingOllama = Get-Command ollama -ErrorAction SilentlyContinue
+        if ($existingOllama) {
+            Write-Host "[OK]   Ollama already installed" -ForegroundColor Green
+        } else {
+            Write-Host "[INFO] Installing Ollama..." -ForegroundColor Blue
+            Start-Process -Wait -FilePath $ollamaInstaller.FullName -ArgumentList "/silent"
+            # Refresh PATH
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + `
+                        [System.Environment]::GetEnvironmentVariable("Path", "User")
+            Write-Host "[OK]   Ollama installed" -ForegroundColor Green
+        }
+    } else {
+        Write-Host "[WARN] No Ollama installer found in bundle/ollama/" -ForegroundColor Yellow
+    }
+}
+
+# ── Step 3: Load model ─────────────────────────────────────────────────────
+if (-not $SkipModel) {
+    $modelDir = "$BundleDir\model"
+    if (Test-Path $modelDir) {
+        $ollamaHome = if ($env:OLLAMA_MODELS) { $env:OLLAMA_MODELS } `
+                      else { "$env:USERPROFILE\.ollama\models" }
+
+        Write-Host "[INFO] Copying model files to $ollamaHome ..." -ForegroundColor Blue
+        if (-not (Test-Path $ollamaHome)) {
+            New-Item -ItemType Directory -Path $ollamaHome -Force | Out-Null
+        }
+        Copy-Item -Path "$modelDir\*" -Destination $ollamaHome -Recurse -Force
+        Write-Host "[OK]   Model files copied" -ForegroundColor Green
+    } else {
+        Write-Host "[WARN] No model directory found in bundle" -ForegroundColor Yellow
+    }
+}
+
+# ── Step 4: Install Aider ──────────────────────────────────────────────────
+if (-not $SkipAider) {
+    $aiderDir = "$BundleDir\aider"
+    if (Test-Path $aiderDir) {
+        $existingAider = Get-Command aider -ErrorAction SilentlyContinue
+        if ($existingAider) {
+            Write-Host "[OK]   Aider already installed" -ForegroundColor Green
+        } else {
+            Write-Host "[INFO] Installing Aider from offline wheels..." -ForegroundColor Blue
+            & python -m pip install --no-index --find-links "$aiderDir" aider-chat 2>&1 | `
+                Select-Object -Last 3
+            Write-Host "[OK]   Aider installed" -ForegroundColor Green
+        }
+    } else {
+        Write-Host "[WARN] No aider wheels found in bundle/aider/" -ForegroundColor Yellow
+    }
+}
+
+# ── Verify ──────────────────────────────────────────────────────────────────
+Write-Host ""
+Write-Host "[INFO] Verifying installation..." -ForegroundColor Blue
+
+$checks = @(
+    @{ Name = "Python";  Cmd = "python --version" },
+    @{ Name = "Ollama";  Cmd = "ollama --version" },
+    @{ Name = "Aider";   Cmd = "aider --version" }
+)
+
+foreach ($check in $checks) {
+    try {
+        $result = Invoke-Expression $check.Cmd 2>&1 | Select-Object -First 1
+        Write-Host "[OK]   $($check.Name): $result" -ForegroundColor Green
+    } catch {
+        Write-Host "[WARN] $($check.Name): not found in PATH" -ForegroundColor Yellow
+    }
+}
+
+# ── Done ────────────────────────────────────────────────────────────────────
+Write-Host ""
+Write-Host "============================================" -ForegroundColor Green
+Write-Host " Installation complete!" -ForegroundColor Green
+Write-Host "============================================" -ForegroundColor Green
+Write-Host ""
+Write-Host " Quick start:"
+Write-Host ""
+Write-Host "   # Start Ollama (open a terminal):"
+Write-Host "   ollama serve"
+Write-Host ""
+Write-Host "   # Open another terminal and launch Aider:"
+PSEOF
+
+    # Append the model tag dynamically (not inside the heredoc)
+    echo "Write-Host \"   aider --model ollama/${MODEL_TAG}\"" >> "${OUTPUT_DIR}/install-offline.ps1"
+
+    cat >> "${OUTPUT_DIR}/install-offline.ps1" << 'PSEOF'
+Write-Host ""
+Write-Host "   # Then inside the Aider REPL:"
+Write-Host "   #   /ask describe the project structure    (read-only exploration)"
+Write-Host "   #   /architect                             (switch to architect mode)"
+Write-Host "   #   paste Claude's plan here               (execute the plan)"
+Write-Host ""
+PSEOF
+
+    ok "Generated install-offline.ps1 (PowerShell)"
+}
+
+generate_linux_installer() {
+    # Copy the existing install.sh and patch it for offline use
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    if [[ -f "${SCRIPT_DIR}/install.sh" ]]; then
+        cp "${SCRIPT_DIR}/install.sh" "${OUTPUT_DIR}/install-offline.sh"
+        chmod +x "${OUTPUT_DIR}/install-offline.sh"
+    fi
+
+    cat > "${OUTPUT_DIR}/install-offline.sh" << BASHEOF
+#!/usr/bin/env bash
+#
+# install-offline.sh — Offline installer for air-gapped Linux environment
+#
+# Run this from the USB drive / copied bundle directory.
+
+set -euo pipefail
+
+BLUE='\033[0;34m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+info()  { echo -e "\${BLUE}[INFO]\${NC} \$*"; }
+ok()    { echo -e "\${GREEN}[OK]\${NC}   \$*"; }
+warn()  { echo -e "\${YELLOW}[WARN]\${NC} \$*"; }
+error() { echo -e "\${RED}[ERROR]\${NC} \$*"; exit 1; }
+
+BUNDLE_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
+OLLAMA_BIN_DIR="\${HOME}/.local/bin"
+MODEL_TAG="${MODEL_TAG}"
+
+echo ""
+echo "============================================"
+echo " Offline AI Coding Environment Setup"
+echo "============================================"
+echo ""
+
+# Step 1: Install Ollama binary
+info "Step 1/3: Installing Ollama..."
+mkdir -p "\$OLLAMA_BIN_DIR"
+if [[ -f "\${BUNDLE_DIR}/ollama/ollama" ]]; then
+    cp "\${BUNDLE_DIR}/ollama/ollama" "\${OLLAMA_BIN_DIR}/ollama"
+    chmod +x "\${OLLAMA_BIN_DIR}/ollama"
+    export PATH="\${OLLAMA_BIN_DIR}:\${PATH}"
+    ok "Ollama installed to \${OLLAMA_BIN_DIR}/ollama"
+else
+    error "Ollama binary not found in bundle/ollama/"
+fi
+
+# Step 2: Copy model files
+info "Step 2/3: Copying model files..."
+OLLAMA_MODELS="\${OLLAMA_MODELS:-\${HOME}/.ollama/models}"
+if [[ -d "\${BUNDLE_DIR}/model" ]]; then
+    mkdir -p "\${OLLAMA_MODELS}"
+    cp -r "\${BUNDLE_DIR}/model/"* "\${OLLAMA_MODELS}/"
+    ok "Model files copied to \${OLLAMA_MODELS}"
+else
+    warn "No model files found in bundle/model/"
+fi
+
+# Step 3: Install Aider from wheels
+info "Step 3/3: Installing Aider..."
+if [[ -d "\${BUNDLE_DIR}/aider" ]]; then
+    python3 -m pip install --user --no-index --find-links "\${BUNDLE_DIR}/aider/" aider-chat 2>&1 | tail -1
+    ok "Aider installed"
+else
+    warn "No aider wheels found in bundle/aider/"
+fi
+
+# Verify
+echo ""
+info "Verifying..."
+command -v ollama &>/dev/null && ok "Ollama: \$(ollama --version 2>&1)" || warn "Ollama not in PATH"
+command -v aider &>/dev/null && ok "Aider: \$(aider --version 2>&1 | head -1)" || warn "Aider not in PATH"
+
+echo ""
+echo "============================================"
+echo -e " \${GREEN}Installation complete!\${NC}"
+echo "============================================"
+echo ""
+echo " Quick start:"
+echo ""
+echo "   ollama serve &"
+echo "   aider --model ollama/\${MODEL_TAG}"
+echo ""
+echo "   # Then inside the Aider REPL:"
+echo "   #   /ask describe the project structure"
+echo "   #   /architect"
+echo ""
+BASHEOF
+
+    chmod +x "${OUTPUT_DIR}/install-offline.sh"
+    ok "Generated install-offline.sh (Bash)"
+}
+
+# ─── Run all steps ────────────────────────────────────────────────────────────
+
+download_ollama
+echo ""
+download_model
+echo ""
+download_python
+echo ""
+download_aider
+echo ""
+generate_install_script
+
+# ─── Summary ──────────────────────────────────────────────────────────────────
+
+echo ""
+echo "============================================"
+echo -e " ${GREEN}Bundle ready!${NC}"
+echo "============================================"
+echo ""
+info "Bundle location: ${OUTPUT_DIR}"
+info "Bundle size:     $(du -sh "${OUTPUT_DIR}" | cut -f1)"
+echo ""
+echo " Contents:"
+echo ""
+ls -1 "${OUTPUT_DIR}/" | while read -r f; do
+    if [[ -d "${OUTPUT_DIR}/${f}" ]]; then
+        SIZE=$(du -sh "${OUTPUT_DIR}/${f}" | cut -f1)
+        echo "   ${f}/  (${SIZE})"
+    else
+        SIZE=$(du -h "${OUTPUT_DIR}/${f}" | cut -f1)
+        echo "   ${f}  (${SIZE})"
+    fi
+done
+echo ""
+echo " Next steps:"
+echo "   1. Copy ${OUTPUT_DIR}/ to a USB drive"
+echo "   2. Virus-scan the USB contents per your institution's policy"
+echo "   3. On the target machine, run:"
+case "${TARGET_OS}" in
+    windows)
+        echo "      PowerShell (as Admin): .\\install-offline.ps1"
+        ;;
+    linux)
+        echo "      bash install-offline.sh"
+        ;;
+esac
+echo ""

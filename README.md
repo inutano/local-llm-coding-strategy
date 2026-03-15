@@ -1,8 +1,13 @@
 # Local LLM Coding Strategy for Secure Genomic Data Environments
 
+> **[日本語版はこちら (README.ja.md)](README.ja.md)**
+
 ## Problem
 
-We need AI-assisted coding in a secure environment that handles sensitive genomic patient data. The environment prohibits outbound network traffic, so cloud-based tools (Claude Code, GitHub Copilot) cannot directly access code or data inside the perimeter. Access is SSH-only via VPN; inbound downloads are permitted.
+We need AI-assisted coding in secure environments handling sensitive genomic patient data. We have two deployment scenarios:
+
+1. **Secure server** (SSH via VPN): Inbound downloads permitted, outbound blocked. Can install software directly.
+2. **Hospital environment** (Windows 11): All network traffic blocked. Software must be brought in via USB after virus scanning.
 
 ## What we investigated
 
@@ -49,19 +54,38 @@ The human operator acts as the **data boundary checkpoint** — only non-sensiti
 | File | Description |
 |------|-------------|
 | [strategy.md](strategy.md) | Full strategy document: assessments, architecture, data boundary checklist, implementation plan, risk assessment |
-| [install.sh](install.sh) | Installation script: sets up Ollama + Qwen 3.5 + Aider with GPU auto-detection |
+| [install.sh](install.sh) | Online installer for secure servers (inbound network allowed) |
+| [download.sh](download.sh) | Bundle downloader for air-gapped environments — run on an internet-connected machine, produces a USB-ready directory with offline installers |
 
 ## Quick start
 
+### Scenario A: Secure server (inbound network allowed)
+
 ```bash
-# On the secure server:
 ./install.sh                          # Auto-detect GPU, install 27B model
 ./install.sh --model 9b               # Or pick a specific size
 ./install.sh --cpu                    # CPU-only fallback
+```
 
-# Start coding:
+### Scenario B: Air-gapped hospital environment (no network)
+
+```bash
+# 1. On an internet-connected machine, download everything:
+./download.sh                              # Default: Windows 11, 9b model
+./download.sh --model 27b                  # Larger model
+./download.sh --os linux                   # Target Linux instead
+
+# 2. Copy the output directory to USB, virus-scan per policy
+
+# 3. On the hospital machine (Windows PowerShell as Admin):
+.\install-offline.ps1
+```
+
+### Start coding (both scenarios)
+
+```bash
 ollama serve &
-aider --model ollama/qwen3.5:27b     # Launch Aider with local model
+aider --model ollama/qwen3.5:9b      # Launch Aider with local model
 
 # Then inside the Aider REPL:
 #   /ask describe the project structure    (read-only exploration)
