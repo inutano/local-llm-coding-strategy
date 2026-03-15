@@ -41,6 +41,7 @@ error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 while [[ $# -gt 0 ]]; do
     case $1 in
         --model)
+            [[ $# -ge 2 ]] || error "--model requires a size argument (e.g., --model 9b)"
             MODEL_SIZE="$2"
             shift 2
             ;;
@@ -118,12 +119,13 @@ detect_gpu() {
 GPU_INFO=$(detect_gpu)
 if [[ "$GPU_INFO" == "cpu" ]]; then
     warn "No GPU detected (or --cpu specified). Using CPU-only mode."
-    if [[ "$FORCE_CPU" == true && "$MODEL_SIZE" == "27b" ]]; then
-        MODEL_SIZE="9b"
-        warn "Downgraded model to ${MODEL_SIZE} for CPU-only mode"
-    fi
     RAM_MB=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || echo "unknown")
     info "System RAM: ${RAM_MB}MB"
+    # Auto-downgrade model for CPU if user didn't explicitly pick a size
+    if [[ "$MODEL_SIZE" == "27b" ]]; then
+        MODEL_SIZE="9b"
+        warn "Auto-downgraded model to ${MODEL_SIZE} for CPU-only mode (override with --model)"
+    fi
 else
     IFS=':' read -r GPU_TYPE GPU_NAME GPU_COUNT TOTAL_GPU_MEM <<< "$GPU_INFO"
     ok "GPU: ${GPU_NAME} x${GPU_COUNT} (${TOTAL_GPU_MEM}MB total VRAM)"
@@ -168,9 +170,32 @@ install_ollama() {
         return 0
     fi
 
-    curl -fsSL https://ollama.com/install.sh | sh
+    # Install to ~/.local/bin (no sudo required)
+    OLLAMA_BIN_DIR="${HOME}/.local/bin"
+    mkdir -p "$OLLAMA_BIN_DIR"
+
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64)  ARCH="amd64" ;;
+        aarch64) ARCH="arm64" ;;
+        *) error "Unsupported architecture: $ARCH" ;;
+    esac
+
+    OLLAMA_URL="https://ollama.com/download/ollama-linux-${ARCH}"
+    info "Downloading Ollama binary to ${OLLAMA_BIN_DIR}/ollama ..."
+    curl -fsSL "$OLLAMA_URL" -o "${OLLAMA_BIN_DIR}/ollama"
+    chmod +x "${OLLAMA_BIN_DIR}/ollama"
+
+    # Ensure ~/.local/bin is in PATH for this session
+    if ! echo "$PATH" | tr ':' '\n' | grep -qx "$OLLAMA_BIN_DIR"; then
+        export PATH="${OLLAMA_BIN_DIR}:${PATH}"
+        warn "${OLLAMA_BIN_DIR} is not in your PATH. Added for this session."
+        warn "Add to your shell profile: export PATH=\"${OLLAMA_BIN_DIR}:\$PATH\""
+    fi
+
     command -v ollama &>/dev/null || error "Ollama installation failed"
-    ok "Ollama installed"
+    OLLAMA_VERSION=$(ollama --version 2>&1 | grep -oP '[\d.]+' | head -1)
+    ok "Ollama installed (version ${OLLAMA_VERSION}) at ${OLLAMA_BIN_DIR}/ollama"
 }
 
 # ─── Step 2: Pull model ───────────────────────────────────────────────────────
@@ -225,16 +250,27 @@ install_aider() {
         return 0
     fi
 
-    $PYTHON -m pip install --user aider-chat 2>&1 | tail -1
+    # Use --user only if not in a virtual environment
+    PIP_FLAGS=""
+    if [[ -z "${VIRTUAL_ENV:-}" ]] && [[ -z "${CONDA_DEFAULT_ENV:-}" ]]; then
+        PIP_FLAGS="--user"
+    fi
+
+    $PYTHON -m pip install $PIP_FLAGS aider-chat 2>&1 | tail -1
     ok "Aider installed"
 
-    # Verify
+    # Verify aider is in PATH
     if ! command -v aider &>/dev/null; then
-        AIDER_PATH=$($PYTHON -c "import site; print(site.getusersitepackages().replace('lib/python${PY_VERSION}/site-packages', 'bin'))" 2>/dev/null)
-        if [[ -f "${AIDER_PATH}/aider" ]]; then
-            warn "Aider installed at ${AIDER_PATH}/aider but not in PATH"
-            warn "Add to your shell profile: export PATH=\"${AIDER_PATH}:\$PATH\""
-        fi
+        # Try common user bin locations
+        for CANDIDATE in \
+            "${HOME}/.local/bin" \
+            "$($PYTHON -c 'import sysconfig; print(sysconfig.get_path("scripts", "posix_user"))' 2>/dev/null)"; do
+            if [[ -n "$CANDIDATE" && -f "${CANDIDATE}/aider" ]]; then
+                warn "Aider installed at ${CANDIDATE}/aider but not in PATH"
+                warn "Add to your shell profile: export PATH=\"${CANDIDATE}:\$PATH\""
+                break
+            fi
+        done
     fi
 }
 
@@ -289,11 +325,10 @@ echo ""
 echo "   # Launch Aider with local model:"
 echo "   aider --model ollama/${MODEL_TAG}"
 echo ""
-echo "   # Explore your codebase (read-only):"
-echo "   aider --model ollama/${MODEL_TAG} /ask \"describe the project structure\""
-echo ""
-echo "   # Execute a plan from Claude:"
-echo "   aider --model ollama/${MODEL_TAG} /architect \"paste plan here\""
+echo "   # Then inside the Aider REPL:"
+echo "   #   /ask describe the project structure    (read-only exploration)"
+echo "   #   /architect                             (switch to architect mode)"
+echo "   #   paste Claude's plan here               (execute the plan)"
 echo ""
 echo " For more details, see strategy.md"
 echo ""

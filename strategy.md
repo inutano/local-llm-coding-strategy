@@ -144,11 +144,12 @@ The human operator acts as the **data boundary checkpoint**, manually reviewing 
 │                                 │      │                               │
 │  Step 1: EXPLORE & COLLECT      │      │                               │
 │  ┌────────────────────────────┐ │      │                               │
-│  │ $ aider /ask "describe    │ │      │                               │
-│  │   the project structure"  │ │      │                               │
 │  │ $ tree -L 2 data/         │ │      │                               │
 │  │ $ head -1 sample.vcf      │ │      │                               │
 │  │ $ wc -l *.py              │ │      │                               │
+│  │ $ aider --model ollama/.. │ │      │                               │
+│  │   > /ask describe the     │ │      │                               │
+│  │     project structure     │ │      │                               │
 │  └────────────┬───────────────┘ │      │                               │
 │               │                 │      │                               │
 │   Collect: schemas, file       │      │                               │
@@ -173,8 +174,9 @@ The human operator acts as the **data boundary checkpoint**, manually reviewing 
 │               │         │       │      │              │                │
 │  Step 3: EXECUTE LOCALLY│       │◀─────│──────────────┘                │
 │  ┌────────────┴───────────────┐ │      │                               │
-│  │ $ aider /architect        │ │      │                               │
-│  │   "Claude's instructions" │ │      │                               │
+│  │ $ aider --model ollama/.. │ │      │                               │
+│  │   > /architect            │ │      │                               │
+│  │   > paste Claude's plan   │ │      │                               │
 │  │                           │ │      │                               │
 │  │ Qwen 3.5 generates code   │ │      │                               │
 │  │ from detailed plan        │ │      │                               │
@@ -207,7 +209,7 @@ Before starting, establish a clear data classification for what information the 
 | Generic column/field names (`chrom`, `pos`, `ref`, `alt`) | Data values, even single rows |
 | Row/record counts, file sizes | Column names that reveal patient conditions |
 | Software versions and configurations | File paths containing study/patient identifiers |
-| Code (scripts, pipelines, configs) — if no data is embedded | Error messages containing data snippets |
+| Code (scripts, pipelines, configs) — **only after reviewing for**: hardcoded paths with study/patient IDs, embedded sample data in test fixtures, comments referencing patients | Error messages containing data snippets |
 | Schema definitions and data type info | Access credentials, API keys, internal hostnames |
 | Public reference genome identifiers (e.g., GRCh38) | Anything derived from or linkable to individual patients |
 
@@ -308,9 +310,9 @@ The main cost of this workflow is the human round-trip between environments. To 
    aider --model ollama/qwen3.5:27b
    ```
 3. **Test the hybrid workflow end-to-end** with a representative task:
-   - Inside: `aider /ask "describe the project structure and data schemas"`
+   - Inside: Launch `aider --model ollama/qwen3.5:27b`, then type `/ask describe the project structure and data schemas` in the Aider REPL
    - Outside: Paste the output to Claude, ask for an analysis plan
-   - Inside: `aider /architect "paste Claude's plan here"`
+   - Inside: In Aider, type `/architect` to switch mode, then paste Claude's plan
    - Verify: Run tests, check generated code
 
 ### Phase 3: Workflow Refinement (Week 3-4)

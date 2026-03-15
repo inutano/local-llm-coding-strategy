@@ -62,6 +62,11 @@ The human operator acts as the **data boundary checkpoint** — only non-sensiti
 # Start coding:
 ollama serve &
 aider --model ollama/qwen3.5:27b     # Launch Aider with local model
+
+# Then inside the Aider REPL:
+#   /ask describe the project structure    (read-only exploration)
+#   /architect                             (switch to architect mode)
+#   paste Claude's plan here               (execute the plan)
 ```
 
 ## Key decisions
