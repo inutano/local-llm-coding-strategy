@@ -1,5 +1,7 @@
 # Strategy: AI-Assisted Coding in a Secure Genomic Data Environment
 
+> **[日本語版はこちら (strategy.ja.md)](strategy.ja.md)**
+
 ## 1. Background and Goal
 
 We operate in a **secure environment** handling sensitive genomic data donated by patients. The environment has the following network constraints:
@@ -281,36 +283,56 @@ The main cost of this workflow is the human round-trip between environments. To 
 
 ## 6. Implementation Plan
 
+Two deployment scenarios are supported. Choose the matching path:
+
+- **Scenario A** — Secure server with inbound network access (SSH/VPN). Use `install.sh`.
+- **Scenario B** — Air-gapped hospital environment (no network, Windows 11). Use `download.sh` on an external PC, bring the bundle in via USB.
+
 ### Phase 1: Infrastructure Setup (Week 1-2)
 
-1. **Provision GPU server** within the secure network
-   - Minimum: 1x RTX 4090 (24GB) for Qwen3.5-27B
-   - Recommended: 2x RTX 4090 or 1x A100-80GB for Qwen3.5-72B
-   - Fallback: CPU-only with Qwen3.5-9B (slower but functional)
-2. **Install Ollama** (inbound download is allowed)
+1. **Provision a machine** within the secure environment
+   - With GPU: RTX 4090 (24GB) for Qwen3.5-27B, or 2x RTX 4090 / A100-80GB for 72B
+   - Without GPU: CPU-only with Qwen3.5-9B (slower but functional)
+   - Note: sudo/admin access is **not** required for Scenario A (install.sh installs to `~/.local/bin`)
+2. **Install the toolchain**
+
+   **Scenario A** (secure server, inbound allowed):
    ```bash
-   # Download directly on the secure server (inbound is permitted):
-   curl -fsSL https://ollama.com/install.sh | sh
-   ollama pull qwen3.5:27b
+   # install.sh downloads Ollama binary to ~/.local/bin (no sudo),
+   # pulls the model, and installs Aider via pip:
+   ./install.sh                    # Auto-detect GPU, default 27B model
+   ./install.sh --model 9b --cpu   # CPU-only with smaller model
+   ```
+
+   **Scenario B** (air-gapped hospital, no network):
+   ```bash
+   # Step 1: On an internet-connected PC, download everything:
+   ./download.sh                          # Default: Windows 11, 9b model
+   ./download.sh --model 27b             # Larger model if GPU available
+   ./download.sh --os linux              # Target Linux instead
+
+   # Step 2: Copy the output directory to USB, virus-scan per institutional policy
+
+   # Step 3: On the hospital machine, run the offline installer:
+   # Windows (PowerShell as Admin):
+   .\install-offline.ps1
+   # Linux:
+   bash install-offline.sh
    ```
 3. **Verify model serving**
    ```bash
    ollama serve &
-   ollama run qwen3.5:27b "Write a Python function to parse a FASTQ file"
+   ollama run qwen3.5:9b "Write a Python function to parse a FASTQ file"
    ```
 
-### Phase 2: Coding Tool Setup (Week 2-3)
+### Phase 2: Hybrid Workflow Validation (Week 2-3)
 
-1. **Install Aider**
+1. **Launch Aider with local Ollama**
    ```bash
-   pip install aider-chat
+   aider --model ollama/qwen3.5:9b
    ```
-2. **Configure Aider to use local Ollama**
-   ```bash
-   aider --model ollama/qwen3.5:27b
-   ```
-3. **Test the hybrid workflow end-to-end** with a representative task:
-   - Inside: Launch `aider --model ollama/qwen3.5:27b`, then type `/ask describe the project structure and data schemas` in the Aider REPL
+2. **Test the hybrid workflow end-to-end** with a representative task:
+   - Inside: Launch Aider, type `/ask describe the project structure and data schemas` in the Aider REPL
    - Outside: Paste the output to Claude, ask for an analysis plan
    - Inside: In Aider, type `/architect` to switch mode, then paste Claude's plan
    - Verify: Run tests, check generated code

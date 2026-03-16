@@ -155,16 +155,56 @@ download_model() {
         ollama pull "$MODEL_TAG"
     fi
 
-    # Copy model blobs to bundle
-    # Ollama stores models in ~/.ollama/models/
+    # Copy only the requested model's files to the bundle.
+    # Ollama stores models in ~/.ollama/models/ with this structure:
+    #   manifests/registry.ollama.ai/<namespace>/<model>/<tag>  (JSON manifest)
+    #   blobs/sha256-<hash>  (actual model layers)
     OLLAMA_MODELS="${OLLAMA_MODELS:-${HOME}/.ollama/models}"
-    if [[ -d "$OLLAMA_MODELS" ]]; then
-        info "Copying model files to bundle..."
-        rsync -a --info=progress2 "$OLLAMA_MODELS/" "${OUTPUT_DIR}/model/"
-        ok "Model files copied ($(du -sh "${OUTPUT_DIR}/model/" | cut -f1))"
-    else
+    if [[ ! -d "$OLLAMA_MODELS" ]]; then
         error "Ollama models directory not found at ${OLLAMA_MODELS}"
     fi
+
+    info "Copying model files for ${MODEL_TAG} to bundle..."
+
+    # Copy the manifest file
+    MANIFEST_DIR="manifests/registry.ollama.ai/library/qwen3.5"
+    if [[ -d "${OLLAMA_MODELS}/${MANIFEST_DIR}" ]]; then
+        mkdir -p "${OUTPUT_DIR}/model/${MANIFEST_DIR}"
+        cp "${OLLAMA_MODELS}/${MANIFEST_DIR}/${MODEL_SIZE}" \
+           "${OUTPUT_DIR}/model/${MANIFEST_DIR}/${MODEL_SIZE}"
+    else
+        error "Manifest not found for ${MODEL_TAG} at ${OLLAMA_MODELS}/${MANIFEST_DIR}"
+    fi
+
+    # Parse the manifest to find referenced blob digests, then copy only those blobs
+    mkdir -p "${OUTPUT_DIR}/model/blobs"
+    MANIFEST_FILE="${OLLAMA_MODELS}/${MANIFEST_DIR}/${MODEL_SIZE}"
+    DIGESTS=$(python3 -c "
+import json, sys
+with open(sys.argv[1]) as f:
+    m = json.load(f)
+digests = set()
+if 'config' in m:
+    digests.add(m['config']['digest'])
+for layer in m.get('layers', []):
+    digests.add(layer['digest'])
+for d in sorted(digests):
+    print(d)
+" "$MANIFEST_FILE" 2>/dev/null) || error "Failed to parse manifest"
+
+    BLOB_COUNT=0
+    for digest in $DIGESTS; do
+        # Ollama stores blobs as sha256-<hex> (colon replaced with dash)
+        blob_file=$(echo "$digest" | tr ':' '-')
+        src="${OLLAMA_MODELS}/blobs/${blob_file}"
+        if [[ -f "$src" ]]; then
+            cp "$src" "${OUTPUT_DIR}/model/blobs/${blob_file}"
+            BLOB_COUNT=$((BLOB_COUNT + 1))
+        else
+            warn "Blob not found: ${blob_file}"
+        fi
+    done
+    ok "Model files copied: ${BLOB_COUNT} blobs ($(du -sh "${OUTPUT_DIR}/model/" | cut -f1))"
 }
 
 ensure_local_ollama() {
@@ -231,32 +271,65 @@ download_aider() {
 
     # pip download can cross-compile for target platform
     case "${TARGET_OS}" in
-        windows) PIP_PLATFORM="win_${TARGET_ARCH}" ;;
-        linux)   PIP_PLATFORM="manylinux2014_$(uname -m)" ;;
+        windows)
+            case "${TARGET_ARCH}" in
+                amd64) PIP_PLATFORM="win_amd64" ;;
+                arm64) PIP_PLATFORM="win_arm64" ;;
+            esac
+            ;;
+        linux)
+            case "${TARGET_ARCH}" in
+                amd64) PIP_PLATFORM="manylinux2014_x86_64" ;;
+                arm64) PIP_PLATFORM="manylinux2014_aarch64" ;;
+            esac
+            ;;
     esac
 
-    # Download wheels for target platform
-    # Use --python-version to match target Python
     PY_SHORT=$(echo "$PYTHON_VERSION" | cut -d. -f1-2 | tr -d '.')
 
+    # Step 1: Download platform-specific binary wheels
+    info "Downloading platform-specific wheels (${PIP_PLATFORM}, Python ${PY_SHORT})..."
     python3 -m pip download \
         --dest "${OUTPUT_DIR}/aider/" \
         --platform "$PIP_PLATFORM" \
         --python-version "$PY_SHORT" \
         --only-binary=:all: \
-        aider-chat 2>&1 | tail -5
+        aider-chat 2>&1 | tail -5 || true
 
-    # Some pure-Python deps may fail with --only-binary, download them separately
+    # Step 2: Download pure-Python packages (platform-independent)
+    # These fail with --only-binary because they have no wheels,
+    # so we download them without platform constraints.
+    info "Downloading pure-Python packages..."
     python3 -m pip download \
         --dest "${OUTPUT_DIR}/aider/" \
-        --no-binary=:none: \
-        aider-chat 2>&1 | tail -5
+        --no-deps \
+        aider-chat 2>&1 | tail -3 || true
 
-    # Deduplicate: if both .whl and .tar.gz exist for same package, keep .whl
-    info "Deduplicating wheels..."
-    WHEEL_COUNT=$(find "${OUTPUT_DIR}/aider/" -name "*.whl" | wc -l)
-    TOTAL_COUNT=$(find "${OUTPUT_DIR}/aider/" -type f | wc -l)
-    ok "Aider wheels downloaded (${WHEEL_COUNT} wheels, ${TOTAL_COUNT} total files, $(du -sh "${OUTPUT_DIR}/aider/" | cut -f1))"
+    # Also grab all deps without platform restriction to catch pure-Python ones
+    # that were skipped by --only-binary
+    python3 -m pip download \
+        --dest "${OUTPUT_DIR}/aider/" \
+        aider-chat 2>&1 | tail -3 || true
+
+    # Deduplicate: if both a .whl and .tar.gz exist for the same package
+    # version, remove the .tar.gz (wheels are preferred for offline install)
+    info "Deduplicating packages..."
+    for whl in "${OUTPUT_DIR}/aider/"*.whl; do
+        [[ -f "$whl" ]] || continue
+        # Extract package name and version from wheel filename (name-version-...)
+        base=$(basename "$whl")
+        pkg_ver=$(echo "$base" | sed -E 's/^([^-]+-[^-]+)-.*/\1/')
+        # Remove matching .tar.gz or .zip
+        for src in "${OUTPUT_DIR}/aider/${pkg_ver}.tar.gz" "${OUTPUT_DIR}/aider/${pkg_ver}.zip"; do
+            if [[ -f "$src" ]]; then
+                rm "$src"
+            fi
+        done
+    done
+
+    WHEEL_COUNT=$(find "${OUTPUT_DIR}/aider/" -name "*.whl" 2>/dev/null | wc -l)
+    TOTAL_COUNT=$(find "${OUTPUT_DIR}/aider/" -type f 2>/dev/null | wc -l)
+    ok "Aider packages downloaded (${WHEEL_COUNT} wheels, ${TOTAL_COUNT} total files, $(du -sh "${OUTPUT_DIR}/aider/" | cut -f1))"
 }
 
 # ─── Step 5: Generate offline install script ─────────────────────────────────
@@ -430,13 +503,6 @@ PSEOF
 }
 
 generate_linux_installer() {
-    # Copy the existing install.sh and patch it for offline use
-    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-    if [[ -f "${SCRIPT_DIR}/install.sh" ]]; then
-        cp "${SCRIPT_DIR}/install.sh" "${OUTPUT_DIR}/install-offline.sh"
-        chmod +x "${OUTPUT_DIR}/install-offline.sh"
-    fi
-
     cat > "${OUTPUT_DIR}/install-offline.sh" << BASHEOF
 #!/usr/bin/env bash
 #

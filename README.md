@@ -53,7 +53,7 @@ The human operator acts as the **data boundary checkpoint** — only non-sensiti
 
 | File | Description |
 |------|-------------|
-| [strategy.md](strategy.md) | Full strategy document: assessments, architecture, data boundary checklist, implementation plan, risk assessment |
+| [strategy.md](strategy.md) / [strategy.ja.md](strategy.ja.md) | Full strategy document: assessments, architecture, data boundary checklist, implementation plan, risk assessment |
 | [install.sh](install.sh) | Online installer for secure servers (inbound network allowed) |
 | [download.sh](download.sh) | Bundle downloader for air-gapped environments — run on an internet-connected machine, produces a USB-ready directory with offline installers |
 
