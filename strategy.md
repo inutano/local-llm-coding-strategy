@@ -4,13 +4,21 @@
 
 ## 1. Background and Goal
 
-We operate in a **secure environment** handling sensitive genomic data donated by patients. The environment has the following network constraints:
+We operate in **secure environments** handling sensitive genomic data donated by patients. We have two deployment scenarios with different constraints:
 
-- **Inbound allowed**: Software packages can be downloaded into the environment
-- **Outbound prohibited**: No data may be sent outside the network
-- **Access method**: SSH via VPN only (CLI-based workflow)
+**Scenario A — Secure server (SSH/VPN)**:
+- Inbound allowed: software packages can be downloaded into the environment
+- Outbound prohibited: no data may be sent outside the network
+- Access method: SSH via VPN only (CLI-based workflow)
+- No sudo/admin access; no GPU may be available
 
-This means cloud-based AI coding assistants (Claude Code via Anthropic API, GitHub Copilot, etc.) cannot be used directly against code or data inside the environment.
+**Scenario B — Air-gapped hospital environment (Windows 11)**:
+- All network traffic blocked (inbound and outbound)
+- Software must be brought in via USB or portable storage after institutional virus scanning
+- Typically Windows 11 desktops; may or may not have a GPU
+- Admin (elevated PowerShell) access may be available for installation only
+
+In both scenarios, cloud-based AI coding assistants (Claude Code via Anthropic API, GitHub Copilot, etc.) cannot be used directly against code or data inside the environment.
 
 **Goal**: Establish a hybrid workflow that combines a local AI coding agent (running inside the secure perimeter) with cloud-based Claude (used outside for planning), ensuring sensitive data never leaves the network while still leveraging the strongest available models for design and architecture decisions.
 
@@ -243,6 +251,8 @@ The main cost of this workflow is the human round-trip between environments. To 
 
 ## 5. Deployment Architecture
 
+### 5.1 Scenario A — Secure server (SSH/VPN)
+
 ```
 ┌──────────────────────────────────────────────────────────┐
 │                  Secure Network Boundary                 │
@@ -278,6 +288,91 @@ The main cost of this workflow is the human round-trip between environments. To 
 │  └──────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────────┘
 ```
+
+### 5.2 Scenario B — Air-gapped hospital (USB transfer)
+
+```
+┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┐
+  Internet-Connected PC (preparation)
+│                                                          │
+  1. Run download.sh
+│    ├── Ollama installer (.exe / binary)                   │
+     ├── Qwen 3.5 model blobs
+│    ├── Python installer (.exe)                            │
+     ├── Aider wheels (pip packages)
+│    └── Generated install-offline script                   │
+│                                                          │
+└ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┬ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┘
+                      │  USB / portable storage
+                      │  (virus-scanned per policy)
+                      ▼
+┌──────────────────────────────────────────────────────────┐
+│           Hospital Network (fully air-gapped)            │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │  Windows 11 Desktop                              │    │
+│  │                                                  │    │
+│  │  install-offline.ps1 installs:                   │    │
+│  │  ┌────────────┐  ┌───────────┐  ┌────────────┐  │    │
+│  │  │ Python 3.x │  │ Ollama    │  │ Aider      │  │    │
+│  │  └────────────┘  └─────┬─────┘  └──────┬─────┘  │    │
+│  │                        │   localhost    │        │    │
+│  │                   ┌────┴────────────────┘        │    │
+│  │                   ▼                              │    │
+│  │  ┌────────────────────────────────────────────┐  │    │
+│  │  │ Qwen 3.5 (9B, CPU or GPU)                 │  │    │
+│  │  │ Model blobs copied from USB               │  │    │
+│  │  └────────────────────────────────────────────┘  │    │
+│  └──────────────────────────────────────────────────┘    │
+│                                                          │
+│  ◉ No network — all inbound/outbound blocked             │
+│  ◉ Genomic data never leaves this boundary               │
+└──────────────────────────────────────────────────────────┘
+         │ metadata (human carries out)     ▲ plans
+         ▼                                  │
+┌──────────────────────────────────────────────────────────┐
+│  Outside (Developer's Laptop / separate PC)              │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │  Claude (cloud API or claude.ai)                 │    │
+│  │  Same hybrid workflow — human is the data ferry  │    │
+│  └──────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────┘
+```
+
+### 5.3 Maintenance and updates
+
+The toolchain (Ollama, Aider, Qwen 3.5) will need periodic updates for bug fixes, security patches, and model improvements.
+
+**Scenario A** (inbound network available):
+
+```bash
+# Update Ollama binary
+curl -fsSL "https://ollama.com/download/ollama-linux-amd64" -o ~/.local/bin/ollama
+
+# Update model (pulls only changed layers)
+ollama pull qwen3.5:27b
+
+# Update Aider
+pip install --upgrade aider-chat    # or: pip install --user --upgrade aider-chat
+```
+
+**Scenario B** (air-gapped — re-run the bundle process):
+
+1. On the internet-connected PC, re-run `./download.sh` with the same options — it will download the latest versions
+2. Copy the new bundle to USB, virus-scan per policy
+3. On the hospital machine, re-run `install-offline.ps1` (or `.sh`) — it will overwrite the previous installation
+
+**Version pinning**: To ensure reproducibility, record installed versions after setup:
+
+```bash
+ollama --version                    # Ollama version
+ollama list                         # Model tags and sizes
+pip show aider-chat | grep Version  # Aider version
+python3 --version                   # Python version
+```
+
+Store this output alongside project documentation so you can reproduce the exact environment if needed.
 
 ---
 
@@ -347,7 +442,12 @@ Two deployment scenarios are supported. Choose the matching path:
 ### Phase 4: Team Rollout (Week 4-6)
 
 1. **Document the hybrid workflow** for other team members
-2. **Create shared model server** if multiple developers need access (consider vLLM)
+2. **Create shared model server** if multiple developers need access:
+   - Switch from Ollama to **vLLM** for concurrent request handling and better GPU utilization
+   - Install: `pip install vllm` (requires CUDA toolkit)
+   - Serve: `vllm serve Qwen/Qwen3.5-27B --host 0.0.0.0 --port 8000`
+   - Each developer points Aider at the shared server: `aider --model openai/qwen3.5 --api-base http://<server>:8000/v1`
+   - See [vLLM documentation](https://docs.vllm.ai/) for multi-GPU, quantization, and scaling options
 3. **Establish usage guidelines**: data boundary checklist, prompt hygiene, code review requirements
 4. **Collect feedback** and iterate on model size / tool choice
 
@@ -365,6 +465,10 @@ Two deployment scenarios are supported. Choose the matching path:
 | Model hallucinations in generated code | Medium | High | All LLM-generated code must be reviewed; never auto-execute on patient data; auto-test catches many errors |
 | Metadata leakage through error messages | Medium | Medium | Review error output before sharing with Claude; strip file paths, sample IDs, data snippets |
 | Ollama/vLLM vulnerabilities | Low | Medium | Pin versions; update via inbound download when patches are available |
+| **Scenario B**: USB transfer corruption or incomplete copy | Medium | High | Verify file checksums after copy; download.sh could generate a manifest with SHA-256 hashes; re-copy if model fails to load |
+| **Scenario B**: Virus scanner quarantines model blobs | Medium | Medium | Large binary files (multi-GB GGUF blobs) may trigger heuristic detection; pre-clear with IT security team; whitelist the Ollama models directory |
+| **Scenario B**: Windows path length or execution policy issues | Low | Medium | PowerShell execution policy may block install-offline.ps1 — run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`; keep file paths short to avoid 260-char limit |
+| **Scenario B**: No package manager for dependency resolution | Low | Low | download.sh bundles all pip wheels; if additional Python packages are needed later, re-run download.sh with updated requirements |
 
 ---
 
