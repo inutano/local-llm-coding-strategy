@@ -212,18 +212,19 @@ The human operator acts as the **data boundary checkpoint**, manually reviewing 
 
 Before starting, establish a clear data classification for what information the operator may bring outside:
 
-| **Safe to bring out** | **NEVER bring out** |
-|---|---|
-| Directory tree structure (`tree -L 2`) | Actual genomic data (sequences, variants, phenotypes) |
-| File formats and extensions (VCF, BAM, FASTQ, CSV) | Patient identifiers, sample IDs linked to patients |
-| Generic column/field names (`chrom`, `pos`, `ref`, `alt`) | Data values, even single rows |
-| Row/record counts, file sizes | Column names that reveal patient conditions |
-| Software versions and configurations | File paths containing study/patient identifiers |
-| Code (scripts, pipelines, configs) — **only after reviewing for**: hardcoded paths with study/patient IDs, embedded sample data in test fixtures, comments referencing patients | Error messages containing data snippets |
-| Schema definitions and data type info | Access credentials, API keys, internal hostnames |
-| Public reference genome identifiers (e.g., GRCh38) | Anything derived from or linkable to individual patients |
+| Category | Safe to bring out | NEVER bring out |
+|----------|------------------|-----------------|
+| **File structure** | Directory tree (`tree -L 2`), file formats and extensions (VCF, BAM, FASTQ, CSV) | File paths containing study/patient identifiers |
+| **Data schema** | Generic column/field names (`chrom`, `pos`, `ref`, `alt`), schema definitions, data types | Column names that reveal patient conditions |
+| **Data content** | Row/record counts, file sizes | Actual values — sequences, variants, phenotypes, even a single row |
+| **Identifiers** | Public reference genome IDs (e.g., GRCh38) | Patient identifiers, sample IDs linked to patients |
+| **Code** | Scripts, pipelines, configs (after review\*) | Hardcoded patient/study IDs, embedded sample data in test fixtures, comments referencing patients |
+| **Software/config** | Software versions, tool configurations | Access credentials, API keys, internal hostnames |
+| **Error output** | Error messages (after sanitizing) | Error messages containing data snippets or patient info |
 
-**Rule of thumb**: If you'd be uncomfortable posting it publicly, don't bring it out.
+\*Before bringing code out, review for: hardcoded paths with study/patient IDs, embedded sample data in test fixtures, comments referencing patients.
+
+**Rule of thumb**: If it is derived from or linkable to individual patients, it must not leave the boundary. If you'd be uncomfortable posting it publicly, don't bring it out.
 
 ### 4.4 Role of each model in this workflow
 
