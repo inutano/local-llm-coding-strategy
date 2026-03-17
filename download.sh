@@ -287,7 +287,10 @@ download_aider() {
 
     PY_SHORT=$(echo "$PYTHON_VERSION" | cut -d. -f1-2 | tr -d '.')
 
-    # Step 1: Download platform-specific binary wheels
+    # Step 1: Download platform-specific binary wheels for the target.
+    # --only-binary=:all: ensures we only get pre-built wheels (no sdists
+    # that would need compilation on the air-gapped machine).
+    # This will skip pure-Python packages that only distribute sdists.
     info "Downloading platform-specific wheels (${PIP_PLATFORM}, Python ${PY_SHORT})..."
     python3 -m pip download \
         --dest "${OUTPUT_DIR}/aider/" \
@@ -296,40 +299,59 @@ download_aider() {
         --only-binary=:all: \
         aider-chat 2>&1 | tail -5 || true
 
-    # Step 2: Download pure-Python packages (platform-independent)
-    # These fail with --only-binary because they have no wheels,
-    # so we download them without platform constraints.
+    # Step 2: Download any missing pure-Python packages.
+    # Pure-Python wheels (tagged "py3-none-any") are platform-independent,
+    # so we can safely download them without --platform. We use --no-binary=:all:
+    # to get source/pure-Python packages, then filter out any platform-specific
+    # sdists that would need compilation.
     info "Downloading pure-Python packages..."
+    # Create a temp dir to avoid polluting the bundle with host-platform binaries
+    PURE_TMP=$(mktemp -d)
     python3 -m pip download \
-        --dest "${OUTPUT_DIR}/aider/" \
-        --no-deps \
-        aider-chat 2>&1 | tail -3 || true
+        --dest "$PURE_TMP" \
+        --python-version "$PY_SHORT" \
+        --no-binary=:all: \
+        aider-chat 2>&1 | tail -5 || true
 
-    # Also grab all deps without platform restriction to catch pure-Python ones
-    # that were skipped by --only-binary
-    python3 -m pip download \
-        --dest "${OUTPUT_DIR}/aider/" \
-        aider-chat 2>&1 | tail -3 || true
+    # Copy only pure-Python wheels (py3-none-any / py2.py3-none-any) and
+    # source distributions (.tar.gz/.zip) that aren't already covered by
+    # a platform-specific wheel we downloaded in Step 1.
+    for pkg in "$PURE_TMP"/*; do
+        [[ -f "$pkg" ]] || continue
+        base=$(basename "$pkg")
 
-    # Deduplicate: if both a .whl and .tar.gz exist for the same package
-    # version, remove the .tar.gz (wheels are preferred for offline install)
-    info "Deduplicating packages..."
-    for whl in "${OUTPUT_DIR}/aider/"*.whl; do
-        [[ -f "$whl" ]] || continue
-        # Extract package name and version from wheel filename (name-version-...)
-        base=$(basename "$whl")
-        pkg_ver=$(echo "$base" | sed -E 's/^([^-]+-[^-]+)-.*/\1/')
-        # Remove matching .tar.gz or .zip
-        for src in "${OUTPUT_DIR}/aider/${pkg_ver}.tar.gz" "${OUTPUT_DIR}/aider/${pkg_ver}.zip"; do
-            if [[ -f "$src" ]]; then
-                rm "$src"
+        # Always copy pure-Python wheels
+        if [[ "$base" == *"-none-any.whl" ]]; then
+            cp "$pkg" "${OUTPUT_DIR}/aider/" 2>/dev/null || true
+            continue
+        fi
+
+        # For sdists (.tar.gz, .zip): copy only if we don't already have
+        # a wheel for the same package name+version
+        pkg_ver=$(echo "$base" | sed -E 's/^([^-]+-[0-9][^-]*).*/\1/' | tr '[:upper:]' '[:lower:]')
+        has_wheel=false
+        for existing in "${OUTPUT_DIR}/aider/"*.whl; do
+            [[ -f "$existing" ]] || continue
+            existing_base=$(basename "$existing" | tr '[:upper:]' '[:lower:]')
+            existing_pv=$(echo "$existing_base" | sed -E 's/^([^-]+-[^-]+)-.*/\1/')
+            if [[ "$existing_pv" == "$pkg_ver" ]]; then
+                has_wheel=true
+                break
             fi
         done
+        if [[ "$has_wheel" == false ]]; then
+            cp "$pkg" "${OUTPUT_DIR}/aider/" 2>/dev/null || true
+        fi
     done
+    rm -rf "$PURE_TMP"
 
     WHEEL_COUNT=$(find "${OUTPUT_DIR}/aider/" -name "*.whl" 2>/dev/null | wc -l)
+    SDIST_COUNT=$(find "${OUTPUT_DIR}/aider/" \( -name "*.tar.gz" -o -name "*.zip" \) 2>/dev/null | wc -l)
     TOTAL_COUNT=$(find "${OUTPUT_DIR}/aider/" -type f 2>/dev/null | wc -l)
-    ok "Aider packages downloaded (${WHEEL_COUNT} wheels, ${TOTAL_COUNT} total files, $(du -sh "${OUTPUT_DIR}/aider/" | cut -f1))"
+    ok "Aider packages downloaded (${WHEEL_COUNT} wheels, ${SDIST_COUNT} sdists, $(du -sh "${OUTPUT_DIR}/aider/" | cut -f1))"
+    if [[ "$SDIST_COUNT" -gt 0 ]]; then
+        warn "Some packages are source distributions (.tar.gz) — the target machine may need a C compiler to install them"
+    fi
 }
 
 # ─── Step 5: Generate offline install script ─────────────────────────────────
@@ -473,6 +495,17 @@ foreach ($check in $checks) {
     }
 }
 
+# Check git config (Aider requires user.name and user.email for auto-commits)
+$gitName = git config --global user.name 2>$null
+$gitEmail = git config --global user.email 2>$null
+if (-not $gitName -or -not $gitEmail) {
+    Write-Host "[WARN] Git user.name or user.email is not set. Aider auto-commit will fail." -ForegroundColor Yellow
+    Write-Host "[WARN] Run: git config --global user.name 'Your Name'" -ForegroundColor Yellow
+    Write-Host "[WARN] Run: git config --global user.email 'your@email.com'" -ForegroundColor Yellow
+} else {
+    Write-Host "[OK]   Git config: $gitName <$gitEmail>" -ForegroundColor Green
+}
+
 # ── Done ────────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "============================================" -ForegroundColor Green
@@ -570,6 +603,17 @@ echo ""
 info "Verifying..."
 command -v ollama &>/dev/null && ok "Ollama: \$(ollama --version 2>&1)" || warn "Ollama not in PATH"
 command -v aider &>/dev/null && ok "Aider: \$(aider --version 2>&1 | head -1)" || warn "Aider not in PATH"
+
+# Check git config (Aider requires user.name and user.email for auto-commits)
+GIT_NAME=\$(git config --global user.name 2>/dev/null || true)
+GIT_EMAIL=\$(git config --global user.email 2>/dev/null || true)
+if [[ -z "\$GIT_NAME" || -z "\$GIT_EMAIL" ]]; then
+    warn "Git user.name or user.email is not set. Aider auto-commit will fail."
+    warn "Run: git config --global user.name 'Your Name'"
+    warn "Run: git config --global user.email 'your@email.com'"
+else
+    ok "Git config: \${GIT_NAME} <\${GIT_EMAIL}>"
+fi
 
 echo ""
 echo "============================================"

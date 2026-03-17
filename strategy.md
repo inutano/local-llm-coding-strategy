@@ -340,8 +340,8 @@ Two deployment scenarios are supported. Choose the matching path:
 ### Phase 3: Workflow Refinement (Week 3-4)
 
 1. **Establish the data boundary checklist** (Section 4.3) and get institutional approval
-2. **Create a project CLAUDE.md** inside the secure env with persistent project context
-3. **Benchmark local model sizes**: Try 9B, 27B, 72B on real tasks to find the minimum viable size for step 3 (instruction-following code generation)
+2. **Create a project CLAUDE.md** inside the secure env with persistent project context (use [templates/CLAUDE.md](templates/CLAUDE.md) as a starting point)
+3. **Benchmark local model sizes**: Run `./benchmark.sh --models 9b,27b,72b` to compare latency and code quality across sizes (see [benchmark.sh](benchmark.sh))
 4. **Optionally experiment with Claude Code + Ollama** as an alternative to Aider
 
 ### Phase 4: Team Rollout (Week 4-6)

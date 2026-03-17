@@ -56,6 +56,8 @@ The human operator acts as the **data boundary checkpoint** — only non-sensiti
 | [strategy.md](strategy.md) / [strategy.ja.md](strategy.ja.md) | Full strategy document: assessments, architecture, data boundary checklist, implementation plan, risk assessment |
 | [install.sh](install.sh) | Online installer for secure servers (inbound network allowed) |
 | [download.sh](download.sh) | Bundle downloader for air-gapped environments — run on an internet-connected machine, produces a USB-ready directory with offline installers |
+| [templates/CLAUDE.md](templates/CLAUDE.md) | Template for persistent project context — paste into Claude at the start of each session to reduce round-trips |
+| [benchmark.sh](benchmark.sh) | Compare model sizes (9B vs 27B vs 72B) on bioinformatics coding tasks — reports latency, throughput, and saves generated code for quality review |
 
 ## Quick start
 

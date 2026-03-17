@@ -310,6 +310,38 @@ if command -v aider &>/dev/null; then
     ok "Aider available"
 fi
 
+# Check git config (Aider requires user.name and user.email for auto-commits)
+GIT_NAME=$(git config --global user.name 2>/dev/null || true)
+GIT_EMAIL=$(git config --global user.email 2>/dev/null || true)
+if [[ -z "$GIT_NAME" || -z "$GIT_EMAIL" ]]; then
+    warn "Git user.name or user.email is not set. Aider auto-commit will fail."
+    warn "Run the following to fix:"
+    warn "  git config --global user.name \"Your Name\""
+    warn "  git config --global user.email \"your@email.com\""
+else
+    ok "Git config: ${GIT_NAME} <${GIT_EMAIL}>"
+fi
+
+# Integration test: verify Aider can talk to Ollama and get a response
+if [[ "$SKIP_MODEL" != true ]] && command -v aider &>/dev/null && \
+   curl -sf "http://${OLLAMA_HOST}:${OLLAMA_PORT}/api/tags" &>/dev/null; then
+    info "Running integration test (Aider → Ollama)..."
+    TEST_DIR=$(mktemp -d)
+    pushd "$TEST_DIR" > /dev/null
+    git init -q && git config user.name "test" && git config user.email "test@test"
+    RESPONSE=$(timeout 120 aider --model "ollama/${MODEL_TAG}" \
+        --no-auto-commits --yes --message "Say hello in one word" 2>&1 | tail -5) || true
+    popd > /dev/null
+    rm -rf "$TEST_DIR"
+    if [[ -n "$RESPONSE" && ! "$RESPONSE" =~ "error" && ! "$RESPONSE" =~ "Error" ]]; then
+        ok "Integration test passed — Aider connected to Ollama successfully"
+    else
+        warn "Integration test: Aider may not be communicating with Ollama correctly"
+        warn "Response: ${RESPONSE}"
+        warn "Try manually: aider --model ollama/${MODEL_TAG}"
+    fi
+fi
+
 # ─── Done ──────────────────────────────────────────────────────────────────────
 
 echo ""
