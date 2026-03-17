@@ -149,63 +149,58 @@ The human operator acts as the **data boundary checkpoint**, manually reviewing 
 ### 4.2 Workflow diagram
 
 ```
-┌─────────────────────────────────┐      ┌───────────────────────────────┐
-│  Secure Environment (SSH/VPN)   │      │  Outside (Your Laptop)        │
-│                                 │      │                               │
-│  Step 1: EXPLORE & COLLECT      │      │                               │
-│  ┌────────────────────────────┐ │      │                               │
-│  │ $ tree -L 2 data/         │ │      │                               │
-│  │ $ head -1 sample.vcf      │ │      │                               │
-│  │ $ wc -l *.py              │ │      │                               │
-│  │ $ aider --model ollama/.. │ │      │                               │
-│  │   > /ask describe the     │ │      │                               │
-│  │     project structure     │ │      │                               │
-│  └────────────┬───────────────┘ │      │                               │
-│               │                 │      │                               │
-│   Collect: schemas, file       │      │                               │
-│   layouts, column names,       │      │                               │
-│   tool versions, error msgs    │      │                               │
-│               │                 │      │                               │
-│  ─ ─ ─ ─ ─ ─ ┼ ─ ─ HUMAN ─ ─ ─│─ ─ ─ │─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ │
-│   REVIEWS what│leaves  ▲       │      │                               │
-│  ─ ─ ─ ─ ─ ─ ┼ ─ ─ ─ ─│─ ─ ─ ─│─ ─ ─ │─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ │
-│               │         │       │      │                               │
-│               ▼         │       │      │  Step 2: PLAN WITH CLAUDE     │
-│               ├─────────│───────│──────│▶ ┌───────────────────────┐    │
-│               │         │       │      │  │ Paste metadata +      │    │
-│               │         │       │      │  │ requirements to Claude │    │
-│               │         │       │      │  │                       │    │
-│               │         │       │      │  │ Claude returns:       │    │
-│               │         │       │      │  │ - Analysis plan       │    │
-│               │         │       │      │  │ - Code architecture   │    │
-│               │         │       │      │  │ - Step-by-step        │    │
-│               │         │       │      │  │   instructions        │    │
-│               │         │       │      │  └───────────┬───────────┘    │
-│               │         │       │      │              │                │
-│  Step 3: EXECUTE LOCALLY│       │◀─────│──────────────┘                │
-│  ┌────────────┴───────────────┐ │      │                               │
-│  │ $ aider --model ollama/.. │ │      │                               │
-│  │   > /architect            │ │      │                               │
-│  │   > paste Claude's plan   │ │      │                               │
-│  │                           │ │      │                               │
-│  │ Qwen 3.5 generates code   │ │      │                               │
-│  │ from detailed plan        │ │      │                               │
-│  └────────────┬───────────────┘ │      │                               │
-│               │                 │      │                               │
-│  Step 4: AUTO-TEST & LINT      │      │                               │
-│  ┌────────────┴───────────────┐ │      │                               │
-│  │ Aider runs tests/linters  │ │      │                               │
-│  │ automatically after edits │ │      │                               │
-│  │                           │ │      │                               │
-│  │ Simple errors: fix locally│ │      │                               │
-│  │ Complex errors: ──────────│─│──────│▶ Step 5: DEBUG WITH CLAUDE    │
-│  │   collect error context,  │ │      │  (repeat from Step 2)         │
-│  │   go back to Step 2       │ │      │                               │
-│  └────────────────────────────┘ │      │                               │
-│                                 │      │                               │
-│  ◉ Genomic data NEVER leaves   │      │  ◉ Only metadata + plans      │
-│    this boundary                │      │    cross the boundary         │
-└─────────────────────────────────┘      └───────────────────────────────┘
+Outside (Your Laptop)                  Secure Environment (SSH/VPN)
+========================               ============================
+
+Step 0: PREPARE SURVEY
+  Ask Claude to generate a
+  targeted survey script, or
+  use the provided survey.sh
+           │
+           │  survey script
+           ▼
+                                       Step 1: EXPLORE & COLLECT
+                                         ./survey.sh /path/to/project > report.txt
+                                         # or: aider > /ask describe structure
+                                         #
+                                         # Collects: schemas, file layouts,
+                                         # column names, tool versions,
+                                         # system specs. Auto-redacts
+                                         # potential patient identifiers.
+                                                    │
+                                        ─ ─ HUMAN REVIEWS report ─ ─
+                                                    │
+           ┌────────────────────────────────────────┘
+           │  metadata (human-reviewed)
+           ▼
+Step 2: PLAN WITH CLAUDE
+  Paste survey report + requirements
+  Claude returns:
+  - Analysis plan
+  - Code architecture
+  - Step-by-step instructions
+           │
+           │  detailed instructions
+           ▼
+                                       Step 3: EXECUTE LOCALLY
+                                         aider > /architect
+                                         aider > paste Claude's plan
+                                         Qwen 3.5 generates code
+                                                    │
+                                                    ▼
+                                       Step 4: AUTO-TEST & LINT
+                                         Aider runs tests/linters
+                                         Simple errors: fix locally ──┐
+                                         Complex errors: ─────┐      │
+                                                    │         │      │
+           ┌──────────────────────────────────────────┘      │
+           │  error context                                   │
+           ▼                                                  │
+Step 5: DEBUG WITH CLAUDE              ◀──────────────────────┘
+  (repeat from Step 2)
+
+◉ Genomic data NEVER leaves            ◉ Only metadata + plans
+  the secure boundary                    cross the boundary
 ```
 
 ### 4.3 What can cross the boundary (and what cannot)
@@ -230,7 +225,8 @@ Before starting, establish a clear data classification for what information the 
 
 | Step | Model | Why this model |
 |------|-------|----------------|
-| **1. Explore** | Local Qwen 3.5 (via Aider `/ask`) | Needs direct file access; even a small model can summarize file structures |
+| **0. Prepare survey** | Cloud Claude | Claude can generate a targeted survey script for the specific project, or the user runs the provided `survey.sh` |
+| **1. Explore** | `survey.sh` + optionally Local Qwen 3.5 (via Aider `/ask`) | `survey.sh` collects system specs, file structure, schemas, and software inventory with built-in redaction. Aider `/ask` can supplement with project-specific exploration |
 | **2. Plan** | Cloud Claude | Best reasoning for architecture and algorithm design; only sees metadata |
 | **3. Execute** | Local Qwen 3.5 (via Aider `/architect` + `/code`) | Follows detailed instructions; needs file access to write code |
 | **4. Test** | No model needed | Automated linting, unit tests, integration tests |
@@ -242,7 +238,7 @@ Before starting, establish a clear data classification for what information the 
 
 The main cost of this workflow is the human round-trip between environments. To minimize iterations:
 
-1. **Be thorough in Step 1**: Collect all context Claude might need upfront — file structure, schemas, existing code patterns, dependency versions, error logs
+1. **Start with `survey.sh`**: Run `./survey.sh /path/to/project > report.txt` to automatically collect system specs, file structure, schemas, and software inventory — with built-in redaction of potential identifiers. For project-specific questions, supplement with Aider `/ask` or ask Claude (Step 0) to generate a targeted survey script
 2. **Ask Claude for complete plans**: Request step-by-step instructions with code snippets, not vague guidance
 3. **Use Aider's auto-test**: Configure linting and test suites so the local agent catches errors without a round-trip
 4. **Batch changes**: Group related changes into a single plan rather than making one round-trip per small change

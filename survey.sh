@@ -1,0 +1,603 @@
+#!/usr/bin/env bash
+#
+# survey.sh — Collect safe-to-share metadata about a secure genomic data environment
+#
+# Generates a text report that can be pasted into Claude for planning (Step 2
+# of the hybrid workflow). NEVER reads actual data values. Built-in safeguards
+# detect and redact patterns that look like patient/sample identifiers.
+#
+# Usage:
+#   ./survey.sh                                # Survey current directory
+#   ./survey.sh /path/to/project               # Survey specific directory
+#   ./survey.sh --redact-pattern "PAT-\d+"     # Add custom redaction pattern
+#   ./survey.sh --no-headers                   # Skip data file schema collection
+#   ./survey.sh --depth 3                      # tree depth (default: 2)
+#
+# Output: Plain text report on stdout. Progress messages on stderr.
+# Pipe to file: ./survey.sh /path/to/project > report.txt
+#
+# Requires: bash 4+, standard Unix tools
+
+set -euo pipefail
+
+# ─── Defaults ──────────────────────────────────────────────────────────────────
+
+TARGET_DIR=""
+REDACT_PATTERNS=()
+TREE_DEPTH=2
+COLLECT_HEADERS=true
+SUSPICIOUS_COUNT=0
+MAX_FILES_PER_TYPE=10       # Max files to inspect headers for per extension
+MAX_FIND_RESULTS=10000      # Cap find results to avoid hanging on huge dirs
+
+# Default redaction patterns (always active)
+DEFAULT_PATTERNS=(
+    '[A-Z]{2,5}-[0-9]{3,}'                        # PAT-001, SUBJ-12345
+    '[A-Z][0-9]{6,}'                               # Accession-style S1234567
+    '(patient|subject|donor|individual|participant)[_-]?[0-9]+'  # patient_01
+    '(sample|specimen|case)[_-]?[0-9]+'            # sample_123
+)
+
+# ─── Colors (stderr only) ────────────────────────────────────────────────────
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+info()  { echo -e "${BLUE}[INFO]${NC} $*" >&2; }
+ok()    { echo -e "${GREEN}[OK]${NC}   $*" >&2; }
+warn()  { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
+err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
+
+# ─── Parse arguments ─────────────────────────────────────────────────────────
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --redact-pattern)
+            [[ $# -ge 2 ]] || err "--redact-pattern requires a regex argument"
+            REDACT_PATTERNS+=("$2")
+            shift 2
+            ;;
+        --no-headers)
+            COLLECT_HEADERS=false
+            shift
+            ;;
+        --depth)
+            [[ $# -ge 2 ]] || err "--depth requires a number"
+            TREE_DEPTH="$2"
+            shift 2
+            ;;
+        --help|-h)
+            head -18 "$0" | tail -14
+            exit 0
+            ;;
+        -*)
+            err "Unknown option: $1. Use --help for usage."
+            ;;
+        *)
+            [[ -z "$TARGET_DIR" ]] || err "Only one target directory can be specified"
+            TARGET_DIR="$1"
+            shift
+            ;;
+    esac
+done
+
+TARGET_DIR="${TARGET_DIR:-.}"
+TARGET_DIR="$(cd "$TARGET_DIR" && pwd)"
+[[ -d "$TARGET_DIR" ]] || err "Directory not found: $TARGET_DIR"
+
+# Combine default + user patterns
+ALL_PATTERNS=("${DEFAULT_PATTERNS[@]}" "${REDACT_PATTERNS[@]}")
+
+# ─── Redaction engine ─────────────────────────────────────────────────────────
+
+redact() {
+    # Read from stdin, apply all patterns, replace matches with [REDACTED]
+    local line
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        for pattern in "${ALL_PATTERNS[@]}"; do
+            if echo "$line" | grep -qiEe "$pattern" 2>/dev/null; then
+                line=$(echo "$line" | sed -E "s/$pattern/[REDACTED]/gi")
+                SUSPICIOUS_COUNT=$((SUSPICIOUS_COUNT + 1))
+            fi
+        done
+        echo "$line"
+    done
+}
+
+# ─── Output helpers ───────────────────────────────────────────────────────────
+
+emit() {
+    # Write to stdout through the redaction filter
+    echo "$@" | redact
+}
+
+emit_raw() {
+    # Write to stdout without redaction (for static text like headers)
+    echo "$@"
+}
+
+emit_section() {
+    emit_raw ""
+    emit_raw "================================================================================"
+    emit_raw "$1"
+    emit_raw "================================================================================"
+    emit_raw ""
+}
+
+# Pipe multi-line content through redact
+emit_pipe() {
+    redact
+}
+
+# ─── Helper: check tool availability ─────────────────────────────────────────
+
+check_tool() {
+    local name="$1"
+    local version_cmd="${2:-}"
+    if command -v "$name" &>/dev/null; then
+        if [[ -n "$version_cmd" ]]; then
+            local ver
+            ver=$($version_cmd 2>&1 | head -1) || ver="(version unknown)"
+            echo "  $name: $ver"
+        else
+            echo "  $name: installed"
+        fi
+    else
+        echo "  $name: not found"
+    fi
+}
+
+# ─── Section: Warning header ─────────────────────────────────────────────────
+
+section_warning() {
+    emit_raw "================================================================================"
+    emit_raw "  ENVIRONMENT SURVEY REPORT"
+    emit_raw "  Generated by survey.sh — safe-to-share metadata only"
+    emit_raw ""
+    emit_raw "  WARNING: Review this report before sharing outside the secure environment."
+    emit_raw "  - This script collected ONLY metadata (no data values)."
+    emit_raw "  - Potential identifiers were automatically redacted as [REDACTED]."
+    emit_raw "  - YOU are responsible for verifying nothing sensitive remains."
+    emit_raw "  - Check the REDACTION SUMMARY at the end of this report."
+    emit_raw "================================================================================"
+    emit_raw ""
+    emit_raw "Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+    emit "Target directory: $TARGET_DIR"
+    emit_raw ""
+}
+
+# ─── Section: System information ──────────────────────────────────────────────
+
+section_system() {
+    emit_section "SYSTEM INFORMATION"
+
+    # OS
+    emit_raw "Operating System:"
+    if [[ -f /etc/os-release ]]; then
+        grep -E '^(NAME|VERSION)=' /etc/os-release 2>/dev/null | sed 's/^/  /' | emit_pipe
+    else
+        echo "  $(uname -s) $(uname -r)" | emit_pipe
+    fi
+    emit_raw ""
+
+    # CPU
+    emit_raw "CPU:"
+    if [[ -f /proc/cpuinfo ]]; then
+        local model
+        model=$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs) || model="unknown"
+        emit_raw "  Model: $model"
+    fi
+    emit_raw "  Cores: $(nproc 2>/dev/null || echo 'unknown')"
+    emit_raw ""
+
+    # RAM
+    emit_raw "Memory:"
+    if command -v free &>/dev/null; then
+        free -h 2>/dev/null | head -2 | sed 's/^/  /'
+    else
+        emit_raw "  (free command not available)"
+    fi
+    emit_raw ""
+
+    # Disk
+    emit_raw "Disk (target filesystem):"
+    df -h "$TARGET_DIR" 2>/dev/null | sed 's/^/  /' || emit_raw "  (df not available)"
+    emit_raw ""
+
+    # GPU
+    emit_raw "GPU:"
+    if command -v nvidia-smi &>/dev/null; then
+        nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null \
+            | sed 's/^/  /' || emit_raw "  (nvidia-smi failed)"
+    else
+        emit_raw "  No NVIDIA GPU detected (nvidia-smi not found)"
+    fi
+}
+
+# ─── Section: Software inventory ──────────────────────────────────────────────
+
+section_software() {
+    emit_section "SOFTWARE INVENTORY"
+
+    emit_raw "Core tools:"
+    check_tool python3 "python3 --version"
+    check_tool pip3 "pip3 --version"
+    check_tool git "git --version"
+    check_tool ollama "ollama --version"
+    check_tool aider "aider --version"
+    emit_raw ""
+
+    emit_raw "Python environments:"
+    check_tool conda "conda --version"
+    check_tool mamba "mamba --version"
+    check_tool virtualenv "virtualenv --version"
+    emit_raw ""
+
+    emit_raw "Bioinformatics tools:"
+    check_tool samtools "samtools --version"
+    check_tool bcftools "bcftools --version"
+    check_tool bwa "bwa 2>&1 | head -3 | tail -1"
+    check_tool bowtie2 "bowtie2 --version"
+    check_tool minimap2 "minimap2 --version"
+    check_tool fastp "fastp --version 2>&1"
+    check_tool fastqc "fastqc --version"
+    check_tool multiqc "multiqc --version"
+    check_tool bedtools "bedtools --version"
+    check_tool gatk "gatk --version 2>&1 | head -1"
+    emit_raw ""
+
+    emit_raw "Pipeline managers:"
+    check_tool snakemake "snakemake --version"
+    check_tool nextflow "nextflow -version 2>&1 | grep version"
+    check_tool cwltool "cwltool --version"
+    emit_raw ""
+
+    emit_raw "Other:"
+    check_tool R "R --version 2>&1 | head -1"
+    check_tool docker "docker --version"
+    check_tool singularity "singularity --version"
+    check_tool apptainer "apptainer --version"
+}
+
+# ─── Section: Network connectivity ────────────────────────────────────────────
+
+section_network() {
+    emit_section "NETWORK CONNECTIVITY"
+    emit_raw "Testing outbound connectivity (helps identify Scenario A vs B):"
+    emit_raw ""
+
+    local endpoints=("https://pypi.org/simple/" "https://ollama.com" "https://github.com")
+    local reachable=0
+
+    for url in "${endpoints[@]}"; do
+        local code
+        code=$(curl -s --connect-timeout 5 -o /dev/null -w "%{http_code}" "$url" 2>/dev/null) || code="000"
+        if [[ "$code" =~ ^[23] ]]; then
+            emit_raw "  $url — reachable (HTTP $code)"
+            reachable=$((reachable + 1))
+        else
+            emit_raw "  $url — unreachable (HTTP $code)"
+        fi
+    done
+
+    emit_raw ""
+    if [[ $reachable -gt 0 ]]; then
+        emit_raw "  Result: Outbound network available (Scenario A)"
+    else
+        emit_raw "  Result: No outbound connectivity detected (Scenario B / air-gapped)"
+    fi
+}
+
+# ─── Section: Directory structure ─────────────────────────────────────────────
+
+section_directory() {
+    emit_section "DIRECTORY STRUCTURE (depth=$TREE_DEPTH)"
+
+    if command -v tree &>/dev/null; then
+        tree -L "$TREE_DEPTH" --dirsfirst -F "$TARGET_DIR" 2>/dev/null | head -200 | emit_pipe
+        local total
+        total=$(find "$TARGET_DIR" -maxdepth "$TREE_DEPTH" -type d 2>/dev/null | wc -l)
+        if [[ $total -gt 200 ]]; then
+            emit_raw "  ... (truncated, $total directories total)"
+        fi
+    else
+        # Fallback: find-based tree
+        find "$TARGET_DIR" -maxdepth "$TREE_DEPTH" -type d 2>/dev/null \
+            | head -200 \
+            | sort \
+            | sed "s|^$TARGET_DIR||" \
+            | sed 's|[^/]*/|  |g' \
+            | emit_pipe
+    fi
+}
+
+# ─── Section: File inventory ──────────────────────────────────────────────────
+
+section_files() {
+    emit_section "FILE INVENTORY"
+
+    emit_raw "Files by extension (top 30):"
+    find "$TARGET_DIR" -type f 2>/dev/null \
+        | head -"$MAX_FIND_RESULTS" \
+        | sed 's/.*\./\./' \
+        | grep '^\.' \
+        | sort \
+        | uniq -c \
+        | sort -rn \
+        | head -30 \
+        | sed 's/^/  /' \
+        || emit_raw "  (no files found)"
+    emit_raw ""
+
+    emit_raw "Genomic data files:"
+    local -a genomic_exts=("vcf" "vcf.gz" "bcf" "bam" "cram" "sam" "fastq" "fastq.gz" "fq" "fq.gz" "bed" "gff" "gtf" "fasta" "fa" "fna")
+    for ext in "${genomic_exts[@]}"; do
+        local count size
+        count=$(find "$TARGET_DIR" -type f -name "*.${ext}" 2>/dev/null | head -"$MAX_FIND_RESULTS" | wc -l)
+        if [[ $count -gt 0 ]]; then
+            size=$(find "$TARGET_DIR" -type f -name "*.${ext}" 2>/dev/null -exec du -ch {} + 2>/dev/null | tail -1 | cut -f1) || size="?"
+            emit_raw "  *.${ext}: ${count} files, ${size} total"
+        fi
+    done
+    emit_raw ""
+
+    emit_raw "Code files:"
+    local -a code_exts=("py" "sh" "R" "r" "smk" "nf" "wdl" "cwl" "pl" "rb" "jl")
+    for ext in "${code_exts[@]}"; do
+        local count lines
+        count=$(find "$TARGET_DIR" -type f -name "*.${ext}" 2>/dev/null | head -"$MAX_FIND_RESULTS" | wc -l)
+        if [[ $count -gt 0 ]]; then
+            lines=$(find "$TARGET_DIR" -type f -name "*.${ext}" 2>/dev/null -exec cat {} + 2>/dev/null | wc -l) || lines="?"
+            emit_raw "  *.${ext}: ${count} files, ${lines} lines total"
+        fi
+    done
+}
+
+# ─── Section: Data file schemas ───────────────────────────────────────────────
+
+section_schemas() {
+    [[ "$COLLECT_HEADERS" == true ]] || return 0
+
+    emit_section "DATA FILE SCHEMAS (headers only — no data values)"
+
+    # VCF files
+    local vcf_files
+    vcf_files=$(find "$TARGET_DIR" -type f \( -name "*.vcf" -o -name "*.vcf.gz" \) 2>/dev/null | head -"$MAX_FILES_PER_TYPE")
+    if [[ -n "$vcf_files" ]]; then
+        emit_raw "VCF file headers:"
+        while IFS= read -r f; do
+            emit_raw ""
+            emit "  File: $f"
+            if [[ "$f" == *.vcf.gz ]]; then
+                if command -v bcftools &>/dev/null; then
+                    bcftools view -h "$f" 2>/dev/null | head -100 | sed 's/^/    /' | emit_pipe
+                elif command -v zgrep &>/dev/null; then
+                    zgrep '^#' "$f" 2>/dev/null | head -100 | sed 's/^/    /' | emit_pipe
+                else
+                    emit_raw "    (cannot read .vcf.gz — install bcftools or zgrep)"
+                fi
+            else
+                grep '^#' "$f" 2>/dev/null | head -100 | sed 's/^/    /' | emit_pipe
+            fi
+            # Warn about sample columns in #CHROM line
+            local chrom_line
+            if [[ "$f" == *.vcf.gz ]]; then
+                chrom_line=$(bcftools view -h "$f" 2>/dev/null | grep '^#CHROM' || true)
+            else
+                chrom_line=$(grep '^#CHROM' "$f" 2>/dev/null || true)
+            fi
+            if [[ -n "$chrom_line" ]]; then
+                local n_samples
+                n_samples=$(echo "$chrom_line" | awk -F'\t' '{print NF - 9}')
+                if [[ $n_samples -gt 0 ]]; then
+                    emit_raw "    NOTE: $n_samples sample column(s) detected in #CHROM line."
+                    emit_raw "    Sample names may contain identifiers — verify redaction above."
+                fi
+            fi
+        done <<< "$vcf_files"
+        emit_raw ""
+    fi
+
+    # CSV/TSV files (first line only)
+    local tabular_files
+    tabular_files=$(find "$TARGET_DIR" -type f \( -name "*.csv" -o -name "*.tsv" -o -name "*.txt" \) 2>/dev/null | head -"$MAX_FILES_PER_TYPE")
+    if [[ -n "$tabular_files" ]]; then
+        emit_raw "CSV/TSV column headers (first line only):"
+        while IFS= read -r f; do
+            # Skip binary files
+            if file "$f" 2>/dev/null | grep -q "text"; then
+                emit "  $f:"
+                head -1 "$f" 2>/dev/null | sed 's/^/    /' | emit_pipe
+            fi
+        done <<< "$tabular_files"
+        emit_raw ""
+    fi
+
+    # BAM/CRAM files
+    local bam_files
+    bam_files=$(find "$TARGET_DIR" -type f \( -name "*.bam" -o -name "*.cram" \) 2>/dev/null | head -"$MAX_FILES_PER_TYPE")
+    if [[ -n "$bam_files" ]]; then
+        emit_raw "BAM/CRAM headers:"
+        if command -v samtools &>/dev/null; then
+            while IFS= read -r f; do
+                emit "  File: $f"
+                samtools view -H "$f" 2>/dev/null | head -50 | sed 's/^/    /' | emit_pipe
+                # Warn about @RG SM: tags
+                local rg_count
+                rg_count=$(samtools view -H "$f" 2>/dev/null | grep -c '^@RG' || true)
+                if [[ $rg_count -gt 0 ]]; then
+                    emit_raw "    NOTE: $rg_count @RG (read group) line(s) detected."
+                    emit_raw "    SM: tags typically contain sample names — verify redaction above."
+                fi
+            done <<< "$bam_files"
+        else
+            emit_raw "  (samtools not installed — cannot read BAM/CRAM headers)"
+        fi
+        emit_raw ""
+    fi
+}
+
+# ─── Section: Code inventory ──────────────────────────────────────────────────
+
+section_code() {
+    emit_section "CODE INVENTORY"
+
+    local code_files
+    code_files=$(find "$TARGET_DIR" -type f \( \
+        -name "*.py" -o -name "*.sh" -o -name "*.R" -o -name "*.r" \
+        -o -name "*.smk" -o -name "*.nf" -o -name "*.wdl" -o -name "*.cwl" \
+        -o -name "*.pl" -o -name "*.rb" -o -name "*.jl" \
+        \) 2>/dev/null | head -100)
+
+    if [[ -n "$code_files" ]]; then
+        emit_raw "Code files with line counts:"
+        while IFS= read -r f; do
+            local lines
+            lines=$(wc -l < "$f" 2>/dev/null) || lines="?"
+            emit "  ${lines} lines  $f"
+        done <<< "$code_files"
+    else
+        emit_raw "  No code files found."
+    fi
+}
+
+# ─── Section: Git information ─────────────────────────────────────────────────
+
+section_git() {
+    # Check if target is inside a git repo
+    if ! git -C "$TARGET_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
+        return 0
+    fi
+
+    emit_section "GIT INFORMATION"
+
+    emit_raw "Branches:"
+    git -C "$TARGET_DIR" branch -a 2>/dev/null | head -20 | sed 's/^/  /' | emit_pipe
+    emit_raw ""
+
+    emit_raw "Recent commits (last 20):"
+    git -C "$TARGET_DIR" log --oneline -20 2>/dev/null | sed 's/^/  /' | emit_pipe
+    emit_raw ""
+
+    emit_raw "Remotes:"
+    git -C "$TARGET_DIR" remote -v 2>/dev/null | sed 's/^/  /' | emit_pipe
+}
+
+# ─── Section: Dependency information ──────────────────────────────────────────
+
+section_dependencies() {
+    emit_section "DEPENDENCY INFORMATION"
+
+    local found=false
+
+    local -a dep_files=(
+        "requirements.txt"
+        "environment.yml"
+        "environment.yaml"
+        "Pipfile"
+        "pyproject.toml"
+        "setup.cfg"
+        "conda-lock.yml"
+        "nextflow.config"
+    )
+
+    for f in "${dep_files[@]}"; do
+        local full_path="$TARGET_DIR/$f"
+        if [[ -f "$full_path" ]]; then
+            found=true
+            emit "  $f:"
+            if [[ "$f" == "conda-lock.yml" ]]; then
+                # Just show the header, not the full lock
+                head -20 "$full_path" 2>/dev/null | sed 's/^/    /' | emit_pipe
+                emit_raw "    ... (truncated)"
+            else
+                cat "$full_path" 2>/dev/null | head -100 | sed 's/^/    /' | emit_pipe
+            fi
+            emit_raw ""
+        fi
+    done
+
+    # Snakefile: list rule names only
+    if [[ -f "$TARGET_DIR/Snakefile" ]]; then
+        found=true
+        emit_raw "  Snakefile rules:"
+        grep '^rule ' "$TARGET_DIR/Snakefile" 2>/dev/null | sed 's/^/    /' | emit_pipe
+        emit_raw ""
+    fi
+
+    [[ "$found" == true ]] || emit_raw "  No dependency files found."
+}
+
+# ─── Section: Ollama status ───────────────────────────────────────────────────
+
+section_ollama() {
+    command -v ollama &>/dev/null || return 0
+
+    emit_section "OLLAMA STATUS"
+
+    if curl -sf "http://localhost:11434/api/tags" &>/dev/null; then
+        emit_raw "Ollama server: running"
+        emit_raw ""
+        emit_raw "Available models:"
+        ollama list 2>/dev/null | sed 's/^/  /'
+    else
+        emit_raw "Ollama server: not running"
+        emit_raw "  Start with: ollama serve &"
+    fi
+}
+
+# ─── Section: Redaction summary ───────────────────────────────────────────────
+
+section_redaction_summary() {
+    emit_raw ""
+    emit_raw "================================================================================"
+    emit_raw "REDACTION SUMMARY"
+    emit_raw "================================================================================"
+    emit_raw ""
+    emit_raw "Total items redacted: $SUSPICIOUS_COUNT"
+    emit_raw ""
+    if [[ $SUSPICIOUS_COUNT -gt 0 ]]; then
+        emit_raw "Active redaction patterns:"
+        for pattern in "${ALL_PATTERNS[@]}"; do
+            emit_raw "  - $pattern"
+        done
+        emit_raw ""
+        emit_raw "Items matching these patterns were replaced with [REDACTED]."
+        emit_raw "If any are false positives, you may manually restore them."
+    else
+        emit_raw "No potential identifiers were detected."
+    fi
+    emit_raw ""
+    emit_raw "If you see UN-redacted items that look like patient/sample identifiers,"
+    emit_raw "DO NOT share this report. Add a custom pattern with --redact-pattern."
+    emit_raw "================================================================================"
+}
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+info "Starting environment survey of: $TARGET_DIR"
+info "Redaction patterns: ${#ALL_PATTERNS[@]} active"
+info "Output goes to stdout (pipe to file with: ./survey.sh > report.txt)"
+info ""
+
+section_warning
+section_system
+section_software
+section_network
+section_directory
+section_files
+section_schemas
+section_code
+section_git
+section_dependencies
+section_ollama
+section_redaction_summary
+
+info ""
+ok "Survey complete. $SUSPICIOUS_COUNT item(s) were redacted."
+if [[ $SUSPICIOUS_COUNT -gt 0 ]]; then
+    warn "Review the report carefully before sharing outside the secure environment."
+fi
