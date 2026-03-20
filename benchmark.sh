@@ -8,7 +8,7 @@
 #
 # Usage:
 #   ./benchmark.sh                         # Default: test 9b and 27b
-#   ./benchmark.sh --models 4b,9b,27b,72b  # Specify sizes to compare
+#   ./benchmark.sh --models 4b,9b,27b      # Specify sizes to compare
 #   ./benchmark.sh --custom "your prompt"  # Add a custom prompt
 #
 # Requires: ollama (running), curl

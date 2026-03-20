@@ -24,56 +24,15 @@ In both scenarios, cloud-based AI coding assistants (Claude Code via Anthropic A
 
 **Candidate local model**: Qwen 3.5 (open-weight, Apache 2.0 license).
 
----
-
-## 2. Assessment: Claude Code with Local LLM Backend
-
-### 2.1 Can Claude Code use a local model?
-
-**Officially: No.** Claude Code is designed exclusively for Anthropic's Claude models. It depends on:
-
-- Anthropic's Messages API protocol (different from OpenAI's chat completions)
-- Claude-specific features: tool use schema, extended thinking, prompt caching, structured outputs
-- Hard-coded model ID validation (accepts only `claude-opus-*`, `claude-sonnet-*`, `claude-haiku-*`)
-
-### 2.2 Community workarounds exist, but with caveats
-
-| Approach | How it works | Maturity | Risk |
-|----------|-------------|----------|------|
-| **Ollama v0.14+** native Anthropic API | Ollama now speaks Anthropic Messages API natively. Set `ANTHROPIC_BASE_URL=http://localhost:11434` | Improving rapidly | Medium — feature parity gaps remain |
-| **local-claude-code** | Community installer that rewires Claude Code to talk to any LLM server | Community-maintained | High — breaks on Claude Code updates |
-| **LiteLLM proxy** | Translates between API formats, sits between Claude Code and local model | Mature proxy | Medium — extra moving part |
-
-### 2.3 Known limitations when using non-Claude models
-
-| Feature | Impact with local models |
-|---------|------------------------|
-| **Tool use (function calling)** | Core to Claude Code's agent loop. Qwen 3.5 supports tool calling, but schema differences may cause failures |
-| **Extended thinking** | Claude-specific; will not work |
-| **Prompt caching** | Claude-specific; will not work (higher latency expected) |
-| **Context compaction** | Claude-specific automatic summarization; local models may hit context limits |
-| **Vision / PDF reading** | Qwen 3.5 supports vision natively, but Claude Code's image handling may not map correctly |
-| **Streaming** | Generally works, but edge cases with tool-use streaming |
-| **Reliability of agent loop** | Claude Code's prompts are optimized for Claude's behavior. Other models may loop, hallucinate tool calls, or fail to recover from errors |
-
-### 2.4 Verdict on Claude Code + Qwen 3.5
-
-**Not recommended as primary strategy.** While technically possible via Ollama v0.14+ or local-claude-code, the experience will be degraded and fragile:
-
-- The agent loop (gather context → take action → verify) is prompt-engineered for Claude models
-- Tool calling schema mismatches cause silent failures
-- No support from Anthropic; breakage on every Claude Code update
-- Debugging issues in a secure environment with no internet access compounds the problem
-
-This approach may be worth **experimenting with** but should not be relied upon for production use.
+> **Note**: We assessed whether Claude Code could work with local models. It is not recommended as a primary approach — see [Appendix A](#appendix-a-why-not-claude-code-with-local-models) for the full investigation.
 
 ---
 
-## 3. Recommended Strategy: Purpose-Built Local-First Tools
+## 2. Recommended Strategy: Purpose-Built Local-First Tools
 
 Instead of forcing Claude Code to work with local models, use tools **designed from the ground up** for local/air-gapped operation with model flexibility.
 
-### 3.1 Recommended tool stack
+### 2.1 Recommended tool stack
 
 #### Primary: Aider
 
@@ -96,7 +55,7 @@ Instead of forcing Claude Code to work with local models, use tools **designed f
 - **Why**: Full local control, offline-first design, persistent sessions. No cloud dependencies.
 - **Air-gapped**: Yes — operates entirely on local machine.
 
-### 3.2 Model selection: Qwen 3.5
+### 2.2 Model selection: Qwen 3.5
 
 Qwen 3.5 is a strong choice for this use case:
 
@@ -107,20 +66,20 @@ Qwen 3.5 is a strong choice for this use case:
 | **Context window** | 262K tokens (extensible to 1M) |
 | **Code benchmarks** | SWE-bench Verified 72.4 (27B model matches GPT-5 mini) |
 | **Tool use** | BFCL-V4 72.2 (outperforms GPT-5 mini by 30%) |
-| **Sizes available** | 0.6B, 1.5B, 4B, 9B, 27B, 72B, 122B-A10B, 397B-A17B |
+| **Sizes available** | 0.8B, 2B, 4B, 9B, 27B, 35B-A3B (MoE), 122B-A10B (MoE), 397B-A17B (MoE) |
 
 **Recommended sizes by hardware**:
 
 | Hardware | Recommended model | Quantization |
 |----------|-------------------|-------------|
 | Single RTX 4090 (24GB) | Qwen3.5-27B | Q4_K_M |
-| 2x RTX 4090 (48GB) | Qwen3.5-72B | Q4_K_M |
+| RTX 6000 Ada (48GB) or 2x RTX 4090 | Qwen3.5-27B | Q8_0 / BF16 |
 | 4x A100 (320GB) or equivalent | Qwen3.5-397B-A17B | FP16/BF16 |
 | CPU-only (128GB+ RAM) | Qwen3.5-9B | Q4_K_M |
 
 Also consider **Qwen3-Coder-Next** — a coding-specialized variant with enhanced long-horizon reasoning and tool usage.
 
-### 3.3 Model serving: Ollama or vLLM
+### 2.3 Model serving: Ollama or vLLM
 
 | | Ollama | vLLM |
 |---|--------|------|
@@ -135,9 +94,9 @@ Also consider **Qwen3-Coder-Next** — a coding-specialized variant with enhance
 
 ---
 
-## 4. Hybrid Workflow: Claude (Outside) + Local Agent (Inside)
+## 3. Hybrid Workflow: Claude (Outside) + Local Agent (Inside)
 
-### 4.1 Core concept
+### 3.1 Core concept
 
 Use each model where it's strongest:
 
@@ -146,7 +105,7 @@ Use each model where it's strongest:
 
 The human operator acts as the **data boundary checkpoint**, manually reviewing what information crosses the perimeter.
 
-### 4.2 Workflow diagram
+### 3.2 Workflow diagram
 
 ```
 Outside (Your Laptop)                  Secure Environment (SSH/VPN)
@@ -203,7 +162,7 @@ Step 5: DEBUG WITH CLAUDE              ◀────────────�
   the secure boundary                    cross the boundary
 ```
 
-### 4.3 What can cross the boundary (and what cannot)
+### 3.3 What can cross the boundary (and what cannot)
 
 Before starting, establish a clear data classification for what information the operator may bring outside:
 
@@ -221,7 +180,7 @@ Before starting, establish a clear data classification for what information the 
 
 **Rule of thumb**: If it is derived from or linkable to individual patients, it must not leave the boundary. If you'd be uncomfortable posting it publicly, don't bring it out.
 
-### 4.4 Role of each model in this workflow
+### 3.4 Role of each model in this workflow
 
 | Step | Model | Why this model |
 |------|-------|----------------|
@@ -234,7 +193,7 @@ Before starting, establish a clear data classification for what information the 
 
 **Key insight**: The local model doesn't need to be as capable as Claude. Since Claude provides detailed, step-by-step instructions, the local model's job is essentially "code generation from a detailed spec" — a much easier task than open-ended design. Even Qwen3.5-9B may suffice for step 3.
 
-### 4.5 Optimizing the round-trip
+### 3.5 Optimizing the round-trip
 
 The main cost of this workflow is the human round-trip between environments. To minimize iterations:
 
@@ -246,9 +205,9 @@ The main cost of this workflow is the human round-trip between environments. To 
 
 ---
 
-## 5. Deployment Architecture
+## 4. Deployment Architecture
 
-### 5.1 Scenario A — Secure server (SSH/VPN)
+### 4.1 Scenario A — Secure server (SSH/VPN)
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -259,7 +218,7 @@ The main cost of this workflow is the human round-trip between environments. To 
 │  │  (Developer)  │      │  (Ollama)                    │  │
 │  │               │      │                              │  │
 │  │  ┌──────────┐ │      │  ┌────────────────────────┐  │  │
-│  │  │ Aider    │ │─────▶│  │ Qwen 3.5 (9B-72B)     │  │  │
+│  │  │ Aider    │ │─────▶│  │ Qwen 3.5 (9B-27B)     │  │  │
 │  │  │          │ │ API  │  │ loaded in GPU memory   │  │  │
 │  │  └──────────┘ │      │  └────────────────────────┘  │  │
 │  │               │      │                              │  │
@@ -286,7 +245,7 @@ The main cost of this workflow is the human round-trip between environments. To 
 └──────────────────────────────────────────────────────────┘
 ```
 
-### 5.2 Scenario B — Air-gapped hospital (USB transfer)
+### 4.2 Scenario B — Air-gapped hospital (USB transfer)
 
 ```
 ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┐
@@ -337,7 +296,7 @@ The main cost of this workflow is the human round-trip between environments. To 
 └──────────────────────────────────────────────────────────┘
 ```
 
-### 5.3 Maintenance and updates
+### 4.3 Maintenance and updates
 
 The toolchain (Ollama, Aider, Qwen 3.5) will need periodic updates for bug fixes, security patches, and model improvements.
 
@@ -373,7 +332,7 @@ Store this output alongside project documentation so you can reproduce the exact
 
 ---
 
-## 6. Implementation Plan
+## 5. Implementation Plan
 
 Two deployment scenarios are supported. Choose the matching path:
 
@@ -383,7 +342,7 @@ Two deployment scenarios are supported. Choose the matching path:
 ### Phase 1: Infrastructure Setup (Week 1-2)
 
 1. **Provision a machine** within the secure environment
-   - With GPU: RTX 4090 (24GB) for Qwen3.5-27B, or 2x RTX 4090 / A100-80GB for 72B
+   - With GPU: RTX 4090 (24GB) for Qwen3.5-27B Q4_K_M, or RTX 6000 Ada (48GB) for 27B Q8_0
    - Without GPU: CPU-only with Qwen3.5-9B (slower but functional)
    - Note: sudo/admin access is **not** required for Scenario A (install.sh installs to `~/.local/bin`)
 2. **Install the toolchain**
@@ -431,9 +390,9 @@ Two deployment scenarios are supported. Choose the matching path:
 
 ### Phase 3: Workflow Refinement (Week 3-4)
 
-1. **Establish the data boundary checklist** (Section 4.3) and get institutional approval
+1. **Establish the data boundary checklist** (Section 3.3) and get institutional approval
 2. **Create a project CLAUDE.md** inside the secure env with persistent project context (use [templates/CLAUDE.md](templates/CLAUDE.md) as a starting point)
-3. **Benchmark local model sizes**: Run `./benchmark.sh --models 9b,27b,72b` to compare latency and code quality across sizes (see [benchmark.sh](benchmark.sh))
+3. **Benchmark local model sizes**: Run `./benchmark.sh --models 9b,27b` to compare latency and code quality across sizes (see [benchmark.sh](benchmark.sh))
 4. **Optionally experiment with Claude Code + Ollama** as an alternative to Aider
 
 ### Phase 4: Team Rollout (Week 4-6)
@@ -450,13 +409,13 @@ Two deployment scenarios are supported. Choose the matching path:
 
 ---
 
-## 7. Risk Assessment
+## 6. Risk Assessment
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
-| Operator accidentally brings sensitive data outside the boundary | Medium | **Critical** | Establish and enforce the data boundary checklist (Section 4.3); institutional review and approval of the checklist before starting |
+| Operator accidentally brings sensitive data outside the boundary | Medium | **Critical** | Establish and enforce the data boundary checklist (Section 3.3); institutional review and approval of the checklist before starting |
 | Round-trip latency slows development | High | Medium | Be thorough in context collection; ask Claude for complete plans; use Aider auto-test to resolve simple errors locally |
-| Qwen 3.5 quality insufficient for instruction-following code generation | Low | Medium | In the hybrid workflow the local model only follows detailed instructions, not open-ended design — a much easier task. Benchmark 9B/27B/72B to find minimum viable size |
+| Qwen 3.5 quality insufficient for instruction-following code generation | Low | Medium | In the hybrid workflow the local model only follows detailed instructions, not open-ended design — a much easier task. Benchmark 9B/27B to find minimum viable size |
 | Claude Code breaks with local models on update | High | Low | Don't depend on it — Aider is the primary tool |
 | GPU hardware unavailable in secure env | Low | High | CPU fallback with Qwen3.5-9B (slower but functional); request GPU procurement early |
 | Model hallucinations in generated code | Medium | High | All LLM-generated code must be reviewed; never auto-execute on patient data; auto-test catches many errors |
@@ -469,7 +428,7 @@ Two deployment scenarios are supported. Choose the matching path:
 
 ---
 
-## 8. Recommendations Summary
+## 7. Recommendations Summary
 
 1. **Adopt the hybrid workflow**: Use Claude (cloud) for planning and design with non-sensitive metadata; use a local agent + Qwen 3.5 for code generation and execution inside the secure environment.
 
@@ -477,7 +436,7 @@ Two deployment scenarios are supported. Choose the matching path:
 
 3. **Use Qwen 3.5** as the local model. Since it only needs to follow detailed instructions (not do open-ended design), even the 9B-27B sizes may suffice. Benchmark before committing to hardware.
 
-4. **Establish and get institutional approval for the data boundary checklist** (Section 4.3) before starting. This is the most important governance step.
+4. **Establish and get institutional approval for the data boundary checklist** (Section 3.3) before starting. This is the most important governance step.
 
 5. **Use Ollama** for model serving — inbound downloads are permitted, so installation is straightforward.
 
@@ -485,7 +444,52 @@ Two deployment scenarios are supported. Choose the matching path:
 
 ---
 
-## Appendix A: Aider vs OpenCode for This Use Case
+## Appendix A: Why Not Claude Code with Local Models?
+
+We assessed whether Claude Code could be used with a local LLM backend (Qwen 3.5 via Ollama) instead of Anthropic's cloud API.
+
+### A.1 Can Claude Code use a local model?
+
+**Officially: No.** Claude Code is designed exclusively for Anthropic's Claude models. It depends on:
+
+- Anthropic's Messages API protocol (different from OpenAI's chat completions)
+- Claude-specific features: tool use schema, extended thinking, prompt caching, structured outputs
+- Hard-coded model ID validation (accepts only `claude-opus-*`, `claude-sonnet-*`, `claude-haiku-*`)
+
+### A.2 Community workarounds exist, but with caveats
+
+| Approach | How it works | Maturity | Risk |
+|----------|-------------|----------|------|
+| **Ollama v0.14+** native Anthropic API | Ollama now speaks Anthropic Messages API natively. Set `ANTHROPIC_BASE_URL=http://localhost:11434` | Improving rapidly | Medium — feature parity gaps remain |
+| **local-claude-code** | Community installer that rewires Claude Code to talk to any LLM server | Community-maintained | High — breaks on Claude Code updates |
+| **LiteLLM proxy** | Translates between API formats, sits between Claude Code and local model | Mature proxy | Medium — extra moving part |
+
+### A.3 Known limitations when using non-Claude models
+
+| Feature | Impact with local models |
+|---------|------------------------|
+| **Tool use (function calling)** | Core to Claude Code's agent loop. Qwen 3.5 supports tool calling, but schema differences may cause failures |
+| **Extended thinking** | Claude-specific; will not work |
+| **Prompt caching** | Claude-specific; will not work (higher latency expected) |
+| **Context compaction** | Claude-specific automatic summarization; local models may hit context limits |
+| **Vision / PDF reading** | Qwen 3.5 supports vision natively, but Claude Code's image handling may not map correctly |
+| **Streaming** | Generally works, but edge cases with tool-use streaming |
+| **Reliability of agent loop** | Claude Code's prompts are optimized for Claude's behavior. Other models may loop, hallucinate tool calls, or fail to recover from errors |
+
+### A.4 Verdict
+
+**Not recommended as primary strategy.** While technically possible via Ollama v0.14+ or local-claude-code, the experience will be degraded and fragile:
+
+- The agent loop (gather context → take action → verify) is prompt-engineered for Claude models
+- Tool calling schema mismatches cause silent failures
+- No support from Anthropic; breakage on every Claude Code update
+- Debugging issues in a secure environment with no internet access compounds the problem
+
+This approach may be worth **experimenting with** but should not be relied upon for production use. This is why we recommend Aider as the primary tool (Section 2).
+
+---
+
+## Appendix B: Aider vs OpenCode for This Use Case
 
 | | **Aider** (recommended) | **OpenCode** (alternative) |
 |---|---|---|
@@ -501,7 +505,7 @@ Two deployment scenarios are supported. Choose the matching path:
 
 ---
 
-## Appendix B: Sources
+## Appendix C: Sources
 
 - [Qwen 3.5 Developer Guide (NxCode)](https://www.nxcode.io/resources/news/qwen-3-5-developer-guide-api-visual-agents-2026)
 - [Qwen 3.5 Architecture and Benchmarks (Medium)](https://medium.com/data-science-in-your-pocket/qwen-3-5-explained-architecture-upgrades-over-qwen-3-benchmarks-and-real-world-use-cases-af38b01e9888)

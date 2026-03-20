@@ -24,7 +24,7 @@ We evaluated local-first coding assistants designed for arbitrary model backends
 
 ### What local model?
 
-**Qwen 3.5** — Apache 2.0 license, 397B params (17B active via MoE), SWE-bench 72.4 (27B matches GPT-5 mini), strong tool-use benchmarks. Available in sizes from 0.6B to 397B.
+**Qwen 3.5** — Apache 2.0 license, 397B params (17B active via MoE), SWE-bench 72.4 (27B matches GPT-5 mini), strong tool-use benchmarks. Available in sizes from 0.8B to 397B.
 
 ## Solution: Hybrid workflow
 
@@ -61,7 +61,7 @@ The human operator acts as the **data boundary checkpoint** — only non-sensiti
 | [download.sh](download.sh) | Bundle downloader for air-gapped environments — run on an internet-connected machine, produces a USB-ready directory with offline installers |
 | [templates/CLAUDE.md](templates/CLAUDE.md) | Template for persistent project context — paste into Claude at the start of each session to reduce round-trips |
 | [survey.sh](survey.sh) | Environment survey script — run inside the secure environment to collect safe-to-share metadata (system specs, file structure, schemas, software inventory) with built-in identifier redaction |
-| [benchmark.sh](benchmark.sh) | Compare model sizes (9B vs 27B vs 72B) on bioinformatics coding tasks — reports latency, throughput, and saves generated code for quality review |
+| [benchmark.sh](benchmark.sh) | Compare model sizes (9B vs 27B) on bioinformatics coding tasks — reports latency, throughput, and saves generated code for quality review |
 
 ## Quick start
 

@@ -1,0 +1,211 @@
+name: Test air-gap scripts
+
+on:
+  push:
+    paths:
+      - 'download.sh'
+      - 'install.sh'
+      - 'survey.sh'
+      - 'benchmark.sh'
+      - '.github/workflows/test-airgap.yml'
+  pull_request:
+    paths:
+      - 'download.sh'
+      - 'install.sh'
+      - 'survey.sh'
+      - 'benchmark.sh'
+      - '.github/workflows/test-airgap.yml'
+  workflow_dispatch:
+
+jobs:
+  # ── Lint all shell scripts ──────────────────────────────────────────────────
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ShellCheck
+        run: sudo apt-get install -y shellcheck
+      - name: Run ShellCheck
+        run: shellcheck -x install.sh download.sh survey.sh benchmark.sh
+
+  # ── Test download.sh + install-offline.sh on Linux ──────────────────────────
+  airgap-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ollama (needed by download.sh to pull model)
+        run: curl -fsSL https://ollama.com/install.sh | sh
+
+      - name: Start Ollama server
+        run: |
+          ollama serve &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:11434/api/tags && break
+            sleep 1
+          done
+
+      - name: Run download.sh (Linux, 0.8b model)
+        run: ./download.sh --os linux --model 0.8b --output /tmp/airgap-bundle
+
+      - name: Verify bundle structure
+        run: |
+          echo "=== Bundle contents ==="
+          ls -lR /tmp/airgap-bundle/
+
+          # Verify expected directories and files
+          ls /tmp/airgap-bundle/ollama/ollama-linux-*.tar.zst
+          test -d /tmp/airgap-bundle/model/blobs
+          test -d /tmp/airgap-bundle/model/manifests
+          test -f /tmp/airgap-bundle/install-offline.sh
+          test -d /tmp/airgap-bundle/aider
+
+          echo "=== Bundle size ==="
+          du -sh /tmp/airgap-bundle/
+          du -sh /tmp/airgap-bundle/*/
+
+      - name: Install zstd (needed by offline installer)
+        run: sudo apt-get install -y zstd
+
+      - name: Test install-offline.sh (dry run in isolated prefix)
+        run: |
+          # Run the offline installer in a clean HOME to simulate the target
+          export HOME=/tmp/test-home
+          mkdir -p "$HOME"
+          git config --global user.name "CI Test"
+          git config --global user.email "ci@test"
+
+          bash /tmp/airgap-bundle/install-offline.sh
+
+          # Verify ollama binary was installed
+          test -f /tmp/test-home/.local/bin/ollama
+          echo "Ollama binary installed OK"
+
+          # Verify model was copied
+          test -d /tmp/test-home/.ollama/models/manifests
+          test -d /tmp/test-home/.ollama/models/blobs
+          echo "Model files copied OK"
+
+  # ── Test download.sh + install-offline.ps1 on Windows ───────────────────────
+  airgap-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # download.sh needs bash + ollama on the build machine.
+      # GitHub Windows runners have Git Bash available.
+      - name: Install Ollama on Windows runner
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://ollama.com/download/OllamaSetup.exe" -OutFile "$env:TEMP\OllamaSetup.exe"
+          Start-Process -Wait -FilePath "$env:TEMP\OllamaSetup.exe" -ArgumentList "/silent"
+          # Add Ollama to PATH for subsequent steps
+          $ollamaPath = "$env:LOCALAPPDATA\Programs\Ollama"
+          echo "$ollamaPath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Start Ollama server
+        shell: pwsh
+        run: |
+          Start-Process -FilePath "ollama" -ArgumentList "serve" -NoNewWindow
+          for ($i = 0; $i -lt 30; $i++) {
+            try {
+              Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -ErrorAction Stop
+              Write-Host "Ollama server ready"
+              break
+            } catch {
+              Start-Sleep -Seconds 1
+            }
+          }
+
+      - name: Run download.sh (Windows target, 0.8b model)
+        shell: bash
+        run: ./download.sh --os windows --model 0.8b --output /tmp/airgap-bundle
+
+      - name: Verify bundle structure
+        shell: bash
+        run: |
+          echo "=== Bundle contents ==="
+          ls -lR /tmp/airgap-bundle/
+
+          test -f /tmp/airgap-bundle/ollama/OllamaSetup.exe
+          test -d /tmp/airgap-bundle/model/blobs
+          test -d /tmp/airgap-bundle/model/manifests
+          test -f /tmp/airgap-bundle/install-offline.ps1
+          test -d /tmp/airgap-bundle/aider
+          test -d /tmp/airgap-bundle/python
+
+          echo "=== Bundle size ==="
+          du -sh /tmp/airgap-bundle/
+          du -sh /tmp/airgap-bundle/*/
+
+      # Note: We skip running install-offline.ps1 on CI because it requires
+      # Administrator privileges (#Requires -RunAsAdministrator) and would
+      # re-install Ollama/Python over the runner's existing installation.
+      # The Linux offline-install test above validates the install logic.
+      - name: Validate install-offline.ps1 syntax
+        shell: pwsh
+        run: |
+          # Find the generated install script in the bundle
+          $scriptPath = Get-ChildItem -Path "$env:TEMP", "C:\tmp", "D:\" -Filter "install-offline.ps1" -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (-not $scriptPath) {
+            # Git Bash /tmp maps to a msys path — search broadly
+            $scriptPath = Get-ChildItem -Path "C:\" -Filter "install-offline.ps1" -Recurse -Depth 5 -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+          }
+          if (-not $scriptPath) {
+            Write-Error "install-offline.ps1 not found in bundle"
+            exit 1
+          }
+          Write-Host "Found: $($scriptPath.FullName)"
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            $scriptPath.FullName,
+            [ref]$null,
+            [ref]$errors
+          )
+          if ($errors.Count -gt 0) {
+            Write-Error "PowerShell syntax errors found:"
+            $errors | ForEach-Object { Write-Error $_.ToString() }
+            exit 1
+          }
+          Write-Host "install-offline.ps1 syntax OK"
+
+  # ── Test install.sh (online installer, CPU-only, skip model) ────────────────
+  install-online:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zstd (needed for Ollama archive)
+        run: sudo apt-get install -y zstd
+
+      - name: Run install.sh (CPU, skip model download)
+        run: ./install.sh --cpu --skip-model
+
+      - name: Verify Ollama installed
+        run: ollama --version
+
+      - name: Verify Aider installed
+        run: aider --version
+
+  # ── Test survey.sh ──────────────────────────────────────────────────────────
+  survey:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run survey.sh on this repository
+        run: |
+          ./survey.sh . > /tmp/survey-report.txt 2>/tmp/survey-stderr.txt || true
+          echo "=== Report (first 50 lines) ==="
+          head -50 /tmp/survey-report.txt
+          echo "=== Report length ==="
+          wc -l /tmp/survey-report.txt
+
+      - name: Verify report is non-empty
+        run: test -s /tmp/survey-report.txt

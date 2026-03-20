@@ -6,11 +6,11 @@
 #
 # Usage:
 #   ./install.sh              # Auto-detect GPU, install 27B model (default)
-#   ./install.sh --model 9b   # Use a specific model size: 0.6b|1.5b|4b|9b|27b|72b
+#   ./install.sh --model 9b   # Use a specific model size: 0.8b|2b|4b|9b|27b
 #   ./install.sh --cpu        # Force CPU-only mode (picks 9b model)
 #   ./install.sh --skip-model # Install tools only, skip model download
 #
-# Requires: curl, python3 (3.9+), pip
+# Requires: curl, python3 (3.9+), pip, zstd
 # Environment: Inbound network allowed, outbound blocked (except approved)
 
 set -euo pipefail
@@ -65,8 +65,8 @@ done
 
 # Validate model size
 case "$MODEL_SIZE" in
-    0.6b|1.5b|4b|9b|27b|72b) ;;
-    *) error "Invalid model size: $MODEL_SIZE. Choose from: 0.6b, 1.5b, 4b, 9b, 27b, 72b" ;;
+    0.8b|2b|4b|9b|27b) ;;
+    *) error "Invalid model size: $MODEL_SIZE. Choose from: 0.8b, 2b, 4b, 9b, 27b" ;;
 esac
 
 # ─── Pre-flight checks ────────────────────────────────────────────────────────
@@ -139,7 +139,7 @@ else
     elif [[ "$TOTAL_GPU_MEM" -lt 32000 ]]; then
         SUGGESTED_SIZE="27b"
     elif [[ "$TOTAL_GPU_MEM" -lt 80000 ]]; then
-        SUGGESTED_SIZE="72b"
+        SUGGESTED_SIZE="27b"
     fi
 
     if [[ "$SUGGESTED_SIZE" != "$MODEL_SIZE" ]]; then
@@ -170,8 +170,9 @@ install_ollama() {
         return 0
     fi
 
-    # Install to ~/.local/bin (no sudo required)
-    OLLAMA_BIN_DIR="${HOME}/.local/bin"
+    # Install to ~/.local (bin/ollama + lib/ollama/) — no sudo required
+    OLLAMA_PREFIX="${HOME}/.local"
+    OLLAMA_BIN_DIR="${OLLAMA_PREFIX}/bin"
     mkdir -p "$OLLAMA_BIN_DIR"
 
     ARCH=$(uname -m)
@@ -181,10 +182,11 @@ install_ollama() {
         *) error "Unsupported architecture: $ARCH" ;;
     esac
 
-    OLLAMA_URL="https://ollama.com/download/ollama-linux-${ARCH}"
-    info "Downloading Ollama binary to ${OLLAMA_BIN_DIR}/ollama ..."
-    curl -fsSL "$OLLAMA_URL" -o "${OLLAMA_BIN_DIR}/ollama"
-    chmod +x "${OLLAMA_BIN_DIR}/ollama"
+    # Ollama distributes Linux as a .tar.zst archive (bin/ollama + lib/ollama/)
+    command -v zstd &>/dev/null || error "zstd is required. Install: sudo apt install zstd (or equivalent)"
+    OLLAMA_URL="https://ollama.com/download/ollama-linux-${ARCH}.tar.zst"
+    info "Downloading Ollama archive to ${OLLAMA_PREFIX}/ ..."
+    curl -fsSL "$OLLAMA_URL" | zstd -d | tar xf - -C "$OLLAMA_PREFIX"
 
     # Ensure ~/.local/bin is in PATH for this session
     if ! echo "$PATH" | tr ':' '\n' | grep -qx "$OLLAMA_BIN_DIR"; then

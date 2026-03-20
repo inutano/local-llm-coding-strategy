@@ -8,7 +8,7 @@
 #
 # Usage:
 #   ./download.sh                              # Default: Windows 11, 9b model
-#   ./download.sh --model 27b                  # Specify model size
+#   ./download.sh --model 27b                  # Specify model size (0.8b|2b|4b|9b|27b)
 #   ./download.sh --os linux                   # Target OS: windows|linux
 #   ./download.sh --arch arm64                 # Target arch: amd64|arm64
 #   ./download.sh --output /path/to/usb        # Output directory
@@ -16,7 +16,7 @@
 # After download, copy the output directory to USB and run the install script
 # on the target machine.
 #
-# Requires: curl, ollama (auto-installed if missing)
+# Requires: curl, python3, pip, ollama (auto-installed if missing)
 
 set -euo pipefail
 
@@ -77,8 +77,8 @@ done
 
 # Validate
 case "$MODEL_SIZE" in
-    0.6b|1.5b|4b|9b|27b|72b) ;;
-    *) error "Invalid model size: $MODEL_SIZE. Choose from: 0.6b, 1.5b, 4b, 9b, 27b, 72b" ;;
+    0.8b|2b|4b|9b|27b) ;;
+    *) error "Invalid model size: $MODEL_SIZE. Choose from: 0.8b, 2b, 4b, 9b, 27b" ;;
 esac
 case "$TARGET_OS" in
     windows|linux) ;;
@@ -121,23 +121,25 @@ download_ollama() {
         windows)
             OLLAMA_URL="https://ollama.com/download/OllamaSetup.exe"
             OLLAMA_FILE="${OUTPUT_DIR}/ollama/OllamaSetup.exe"
+            if [[ -f "$OLLAMA_FILE" ]]; then
+                ok "Ollama already downloaded"
+                return 0
+            fi
+            curl -fSL "$OLLAMA_URL" -o "$OLLAMA_FILE"
+            ok "Ollama downloaded ($(du -h "$OLLAMA_FILE" | cut -f1))"
             ;;
         linux)
-            OLLAMA_URL="https://ollama.com/download/ollama-linux-${TARGET_ARCH}"
-            OLLAMA_FILE="${OUTPUT_DIR}/ollama/ollama"
+            # Ollama distributes Linux as a .tar.zst archive containing bin/ollama + lib/ollama/
+            OLLAMA_ARCHIVE="${OUTPUT_DIR}/ollama/ollama-linux-${TARGET_ARCH}.tar.zst"
+            if [[ -f "$OLLAMA_ARCHIVE" ]]; then
+                ok "Ollama archive already downloaded"
+                return 0
+            fi
+            OLLAMA_URL="https://ollama.com/download/ollama-linux-${TARGET_ARCH}.tar.zst"
+            curl -fSL "$OLLAMA_URL" -o "$OLLAMA_ARCHIVE"
+            ok "Ollama archive downloaded ($(du -h "$OLLAMA_ARCHIVE" | cut -f1))"
             ;;
     esac
-
-    if [[ -f "$OLLAMA_FILE" ]]; then
-        ok "Ollama already downloaded"
-        return 0
-    fi
-
-    curl -fSL "$OLLAMA_URL" -o "$OLLAMA_FILE"
-    if [[ "$TARGET_OS" == "linux" ]]; then
-        chmod +x "$OLLAMA_FILE"
-    fi
-    ok "Ollama downloaded ($(du -h "$OLLAMA_FILE" | cut -f1))"
 }
 
 # ─── Step 2: Download model ──────────────────────────────────────────────────
@@ -159,9 +161,15 @@ download_model() {
     # Ollama stores models in ~/.ollama/models/ with this structure:
     #   manifests/registry.ollama.ai/<namespace>/<model>/<tag>  (JSON manifest)
     #   blobs/sha256-<hash>  (actual model layers)
-    OLLAMA_MODELS="${OLLAMA_MODELS:-${HOME}/.ollama/models}"
-    if [[ ! -d "$OLLAMA_MODELS" ]]; then
-        error "Ollama models directory not found at ${OLLAMA_MODELS}"
+    # Detect Ollama models directory: env var, user home, or systemd service location
+    if [[ -n "${OLLAMA_MODELS:-}" && -d "$OLLAMA_MODELS" ]]; then
+        : # already set
+    elif [[ -d "${HOME}/.ollama/models" ]]; then
+        OLLAMA_MODELS="${HOME}/.ollama/models"
+    elif [[ -d "/usr/share/ollama/.ollama/models" ]]; then
+        OLLAMA_MODELS="/usr/share/ollama/.ollama/models"
+    else
+        error "Ollama models directory not found. Set OLLAMA_MODELS env var."
     fi
 
     info "Copying model files for ${MODEL_TAG} to bundle..."
@@ -269,81 +277,66 @@ download_python() {
 download_aider() {
     info "Step 4/5: Downloading Aider and dependencies as wheels..."
 
-    # pip download can cross-compile for target platform
-    case "${TARGET_OS}" in
-        windows)
-            case "${TARGET_ARCH}" in
-                amd64) PIP_PLATFORM="win_amd64" ;;
-                arm64) PIP_PLATFORM="win_arm64" ;;
-            esac
-            ;;
-        linux)
-            case "${TARGET_ARCH}" in
-                amd64) PIP_PLATFORM="manylinux2014_x86_64" ;;
-                arm64) PIP_PLATFORM="manylinux2014_aarch64" ;;
-            esac
-            ;;
+    # Detect if we're building for the current platform or cross-platform
+    CURRENT_OS="linux"
+    [[ "$(uname -s)" == "Darwin" ]] && CURRENT_OS="macos"
+    CURRENT_ARCH=$(uname -m)
+    case "$CURRENT_ARCH" in
+        x86_64)  CURRENT_ARCH="amd64" ;;
+        aarch64) CURRENT_ARCH="arm64" ;;
     esac
 
-    PY_SHORT=$(echo "$PYTHON_VERSION" | cut -d. -f1-2 | tr -d '.')
+    if [[ "$TARGET_OS" == "linux" && "$TARGET_ARCH" == "$CURRENT_ARCH" ]]; then
+        # Same platform — pip download without constraints (most reliable)
+        info "Downloading wheels for current platform..."
+        python3 -m pip download \
+            --dest "${OUTPUT_DIR}/aider/" \
+            aider-chat 2>&1 | tail -3 || true
+    else
+        # Cross-platform download — use platform constraints
+        case "${TARGET_OS}" in
+            windows)
+                case "${TARGET_ARCH}" in
+                    amd64) PIP_PLATFORM="win_amd64" ;;
+                    arm64) PIP_PLATFORM="win_arm64" ;;
+                esac
+                ;;
+            linux)
+                case "${TARGET_ARCH}" in
+                    amd64) PIP_PLATFORM="manylinux2014_x86_64" ;;
+                    arm64) PIP_PLATFORM="manylinux2014_aarch64" ;;
+                esac
+                ;;
+        esac
 
-    # Step 1: Download platform-specific binary wheels for the target.
-    # --only-binary=:all: ensures we only get pre-built wheels (no sdists
-    # that would need compilation on the air-gapped machine).
-    # This will skip pure-Python packages that only distribute sdists.
-    info "Downloading platform-specific wheels (${PIP_PLATFORM}, Python ${PY_SHORT})..."
-    python3 -m pip download \
-        --dest "${OUTPUT_DIR}/aider/" \
-        --platform "$PIP_PLATFORM" \
-        --python-version "$PY_SHORT" \
-        --only-binary=:all: \
-        aider-chat 2>&1 | tail -5 || true
+        PY_SHORT=$(echo "$PYTHON_VERSION" | cut -d. -f1-2 | tr -d '.')
 
-    # Step 2: Download any missing pure-Python packages.
-    # Pure-Python wheels (tagged "py3-none-any") are platform-independent,
-    # so we can safely download them without --platform. We use --no-binary=:all:
-    # to get source/pure-Python packages, then filter out any platform-specific
-    # sdists that would need compilation.
-    info "Downloading pure-Python packages..."
-    # Create a temp dir to avoid polluting the bundle with host-platform binaries
-    PURE_TMP=$(mktemp -d)
-    python3 -m pip download \
-        --dest "$PURE_TMP" \
-        --python-version "$PY_SHORT" \
-        --no-binary=:all: \
-        aider-chat 2>&1 | tail -5 || true
+        # Download platform-specific binary wheels
+        info "Downloading platform-specific wheels (${PIP_PLATFORM}, Python ${PY_SHORT})..."
+        python3 -m pip download \
+            --dest "${OUTPUT_DIR}/aider/" \
+            --platform "$PIP_PLATFORM" \
+            --python-version "$PY_SHORT" \
+            --only-binary=:all: \
+            aider-chat 2>&1 | tail -3 || true
 
-    # Copy only pure-Python wheels (py3-none-any / py2.py3-none-any) and
-    # source distributions (.tar.gz/.zip) that aren't already covered by
-    # a platform-specific wheel we downloaded in Step 1.
-    for pkg in "$PURE_TMP"/*; do
-        [[ -f "$pkg" ]] || continue
-        base=$(basename "$pkg")
+        # Download pure-Python packages separately
+        info "Downloading pure-Python packages..."
+        PURE_TMP=$(mktemp -d)
+        python3 -m pip download \
+            --dest "$PURE_TMP" \
+            aider-chat 2>&1 | tail -3 || true
 
-        # Always copy pure-Python wheels
-        if [[ "$base" == *"-none-any.whl" ]]; then
-            cp "$pkg" "${OUTPUT_DIR}/aider/" 2>/dev/null || true
-            continue
-        fi
-
-        # For sdists (.tar.gz, .zip): copy only if we don't already have
-        # a wheel for the same package name+version
-        pkg_ver=$(echo "$base" | sed -E 's/^([^-]+-[0-9][^-]*).*/\1/' | tr '[:upper:]' '[:lower:]')
-        has_wheel=false
-        for existing in "${OUTPUT_DIR}/aider/"*.whl; do
-            [[ -f "$existing" ]] || continue
-            existing_base=$(basename "$existing" | tr '[:upper:]' '[:lower:]')
-            existing_pv=$(echo "$existing_base" | sed -E 's/^([^-]+-[^-]+)-.*/\1/')
-            if [[ "$existing_pv" == "$pkg_ver" ]]; then
-                has_wheel=true
-                break
+        # Copy only pure-Python wheels (none-any) that we don't already have
+        for pkg in "$PURE_TMP"/*; do
+            [[ -f "$pkg" ]] || continue
+            base=$(basename "$pkg")
+            if [[ "$base" == *"-none-any.whl" ]]; then
+                [[ ! -f "${OUTPUT_DIR}/aider/${base}" ]] && cp "$pkg" "${OUTPUT_DIR}/aider/" 2>/dev/null || true
             fi
         done
-        if [[ "$has_wheel" == false ]]; then
-            cp "$pkg" "${OUTPUT_DIR}/aider/" 2>/dev/null || true
-        fi
-    done
-    rm -rf "$PURE_TMP"
+        rm -rf "$PURE_TMP"
+    fi
 
     WHEEL_COUNT=$(find "${OUTPUT_DIR}/aider/" -name "*.whl" 2>/dev/null | wc -l)
     SDIST_COUNT=$(find "${OUTPUT_DIR}/aider/" \( -name "*.tar.gz" -o -name "*.zip" \) 2>/dev/null | wc -l)
@@ -566,10 +559,20 @@ echo " Offline AI Coding Environment Setup"
 echo "============================================"
 echo ""
 
-# Step 1: Install Ollama binary
+# Step 1: Install Ollama from archive
 info "Step 1/3: Installing Ollama..."
-mkdir -p "\$OLLAMA_BIN_DIR"
-if [[ -f "\${BUNDLE_DIR}/ollama/ollama" ]]; then
+OLLAMA_ARCHIVE=\$(find "\${BUNDLE_DIR}/ollama" -name "*.tar.zst" 2>/dev/null | head -1)
+if [[ -n "\$OLLAMA_ARCHIVE" ]]; then
+    # Modern format: .tar.zst archive with bin/ollama + lib/ollama/
+    command -v zstd &>/dev/null || error "zstd is required to extract Ollama archive. Install: sudo apt install zstd"
+    OLLAMA_PREFIX="\${HOME}/.local"
+    mkdir -p "\${OLLAMA_PREFIX}"
+    zstd -d "\$OLLAMA_ARCHIVE" --stdout | tar xf - -C "\${OLLAMA_PREFIX}"
+    export PATH="\${OLLAMA_PREFIX}/bin:\${PATH}"
+    ok "Ollama installed to \${OLLAMA_PREFIX}/bin/ollama"
+elif [[ -f "\${BUNDLE_DIR}/ollama/ollama" ]]; then
+    # Legacy format: standalone binary
+    mkdir -p "\$OLLAMA_BIN_DIR"
     cp "\${BUNDLE_DIR}/ollama/ollama" "\${OLLAMA_BIN_DIR}/ollama"
     chmod +x "\${OLLAMA_BIN_DIR}/ollama"
     export PATH="\${OLLAMA_BIN_DIR}:\${PATH}"
