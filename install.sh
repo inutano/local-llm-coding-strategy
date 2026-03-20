@@ -127,7 +127,7 @@ if [[ "$GPU_INFO" == "cpu" ]]; then
         warn "Auto-downgraded model to ${MODEL_SIZE} for CPU-only mode (override with --model)"
     fi
 else
-    IFS=':' read -r GPU_TYPE GPU_NAME GPU_COUNT TOTAL_GPU_MEM <<< "$GPU_INFO"
+    IFS=':' read -r _ GPU_NAME GPU_COUNT TOTAL_GPU_MEM <<< "$GPU_INFO"
     ok "GPU: ${GPU_NAME} x${GPU_COUNT} (${TOTAL_GPU_MEM}MB total VRAM)"
 
     # Suggest model size based on VRAM

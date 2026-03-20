@@ -278,8 +278,6 @@ download_aider() {
     info "Step 4/5: Downloading Aider and dependencies as wheels..."
 
     # Detect if we're building for the current platform or cross-platform
-    CURRENT_OS="linux"
-    [[ "$(uname -s)" == "Darwin" ]] && CURRENT_OS="macos"
     CURRENT_ARCH=$(uname -m)
     case "$CURRENT_ARCH" in
         x86_64)  CURRENT_ARCH="amd64" ;;
@@ -332,7 +330,9 @@ download_aider() {
             [[ -f "$pkg" ]] || continue
             base=$(basename "$pkg")
             if [[ "$base" == *"-none-any.whl" ]]; then
-                [[ ! -f "${OUTPUT_DIR}/aider/${base}" ]] && cp "$pkg" "${OUTPUT_DIR}/aider/" 2>/dev/null || true
+                if [[ ! -f "${OUTPUT_DIR}/aider/${base}" ]]; then
+                    cp "$pkg" "${OUTPUT_DIR}/aider/" 2>/dev/null || true
+                fi
             fi
         done
         rm -rf "$PURE_TMP"
@@ -340,7 +340,6 @@ download_aider() {
 
     WHEEL_COUNT=$(find "${OUTPUT_DIR}/aider/" -name "*.whl" 2>/dev/null | wc -l)
     SDIST_COUNT=$(find "${OUTPUT_DIR}/aider/" \( -name "*.tar.gz" -o -name "*.zip" \) 2>/dev/null | wc -l)
-    TOTAL_COUNT=$(find "${OUTPUT_DIR}/aider/" -type f 2>/dev/null | wc -l)
     ok "Aider packages downloaded (${WHEEL_COUNT} wheels, ${SDIST_COUNT} sdists, $(du -sh "${OUTPUT_DIR}/aider/" | cut -f1))"
     if [[ "$SDIST_COUNT" -gt 0 ]]; then
         warn "Some packages are source distributions (.tar.gz) — the target machine may need a C compiler to install them"
@@ -662,13 +661,14 @@ info "Bundle size:     $(du -sh "${OUTPUT_DIR}" | cut -f1)"
 echo ""
 echo " Contents:"
 echo ""
-ls -1 "${OUTPUT_DIR}/" | while read -r f; do
-    if [[ -d "${OUTPUT_DIR}/${f}" ]]; then
-        SIZE=$(du -sh "${OUTPUT_DIR}/${f}" | cut -f1)
-        echo "   ${f}/  (${SIZE})"
+for f in "${OUTPUT_DIR}/"*; do
+    base=$(basename "$f")
+    if [[ -d "$f" ]]; then
+        SIZE=$(du -sh "$f" | cut -f1)
+        echo "   ${base}/  (${SIZE})"
     else
-        SIZE=$(du -h "${OUTPUT_DIR}/${f}" | cut -f1)
-        echo "   ${f}  (${SIZE})"
+        SIZE=$(du -h "$f" | cut -f1)
+        echo "   ${base}  (${SIZE})"
     fi
 done
 echo ""

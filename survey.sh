@@ -338,7 +338,7 @@ section_files() {
         local count size
         count=$(find "$TARGET_DIR" -type f -name "*.${ext}" 2>/dev/null | head -"$MAX_FIND_RESULTS" | wc -l)
         if [[ $count -gt 0 ]]; then
-            size=$(find "$TARGET_DIR" -type f -name "*.${ext}" 2>/dev/null -exec du -ch {} + 2>/dev/null | tail -1 | cut -f1) || size="?"
+            size=$(find "$TARGET_DIR" -type f -name "*.${ext}" 2>/dev/null -print0 | xargs -0 du -ch 2>/dev/null | tail -1 | cut -f1) || size="?"
             emit_raw "  *.${ext}: ${count} files, ${size} total"
         fi
     done
@@ -350,7 +350,7 @@ section_files() {
         local count lines
         count=$(find "$TARGET_DIR" -type f -name "*.${ext}" 2>/dev/null | head -"$MAX_FIND_RESULTS" | wc -l)
         if [[ $count -gt 0 ]]; then
-            lines=$(find "$TARGET_DIR" -type f -name "*.${ext}" 2>/dev/null -exec cat {} + 2>/dev/null | wc -l) || lines="?"
+            lines=$(find "$TARGET_DIR" -type f -name "*.${ext}" 2>/dev/null -print0 | xargs -0 cat 2>/dev/null | wc -l) || lines="?"
             emit_raw "  *.${ext}: ${count} files, ${lines} lines total"
         fi
     done
@@ -514,7 +514,7 @@ section_dependencies() {
                 head -20 "$full_path" 2>/dev/null | sed 's/^/    /' | emit_pipe
                 emit_raw "    ... (truncated)"
             else
-                cat "$full_path" 2>/dev/null | head -100 | sed 's/^/    /' | emit_pipe
+                head -100 "$full_path" 2>/dev/null | sed 's/^/    /' | emit_pipe
             fi
             emit_raw ""
         fi
