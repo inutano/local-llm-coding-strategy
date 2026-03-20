@@ -1,5 +1,7 @@
 # Local LLM Coding Strategy for Secure Genomic Data Environments
 
+[![Test air-gap scripts](https://github.com/inutano/local-llm-coding-strategy/actions/workflows/test-airgap.yml/badge.svg)](https://github.com/inutano/local-llm-coding-strategy/actions/workflows/test-airgap.yml)
+
 > **[日本語版はこちら (README.ja.md)](README.ja.md)**
 
 ## Problem

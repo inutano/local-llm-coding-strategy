@@ -1,5 +1,7 @@
 # セキュアなゲノムデータ環境におけるローカルLLMコーディング戦略
 
+[![Test air-gap scripts](https://github.com/inutano/local-llm-coding-strategy/actions/workflows/test-airgap.yml/badge.svg)](https://github.com/inutano/local-llm-coding-strategy/actions/workflows/test-airgap.yml)
+
 > **[English version (README.md)](README.md)**
 
 ## 課題
