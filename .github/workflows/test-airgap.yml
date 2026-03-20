@@ -87,82 +87,53 @@ jobs:
           test -d /tmp/test-home/.ollama/models/blobs
           echo "Model files copied OK"
 
-  # ── Test download.sh + install-offline.ps1 on Windows ───────────────────────
+  # ── Test download.sh for Windows target (cross-build on Linux) ───────────────
+  # OllamaSetup.exe /silent takes 30+ minutes on Windows runners (GPU driver
+  # install), so we generate the Windows bundle on Linux instead. The model
+  # blobs and Ollama installer are platform-independent downloads; only the
+  # install-offline.ps1 syntax is validated.
   airgap-windows:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      # download.sh needs bash + ollama on the build machine.
-      # GitHub Windows runners have Git Bash available.
-      - name: Install Ollama on Windows runner
-        shell: pwsh
-        run: |
-          Invoke-WebRequest -Uri "https://ollama.com/download/OllamaSetup.exe" -OutFile "$env:TEMP\OllamaSetup.exe"
-          Start-Process -Wait -FilePath "$env:TEMP\OllamaSetup.exe" -ArgumentList "/silent"
-          # Add Ollama to PATH for subsequent steps
-          $ollamaPath = "$env:LOCALAPPDATA\Programs\Ollama"
-          echo "$ollamaPath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Install Ollama (needed to pull model)
+        run: curl -fsSL https://ollama.com/install.sh | sh
 
       - name: Start Ollama server
-        shell: pwsh
         run: |
-          Start-Process -FilePath "ollama" -ArgumentList "serve" -NoNewWindow
-          for ($i = 0; $i -lt 30; $i++) {
-            try {
-              Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -ErrorAction Stop
-              Write-Host "Ollama server ready"
-              break
-            } catch {
-              Start-Sleep -Seconds 1
-            }
-          }
+          ollama serve &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:11434/api/tags && break
+            sleep 1
+          done
 
       - name: Run download.sh (Windows target, 0.8b model)
-        shell: bash
-        run: ./download.sh --os windows --model 0.8b --output /tmp/airgap-bundle
+        run: ./download.sh --os windows --model 0.8b --output /tmp/airgap-bundle-win
 
       - name: Verify bundle structure
-        shell: bash
         run: |
           echo "=== Bundle contents ==="
-          ls -lR /tmp/airgap-bundle/
+          ls -lR /tmp/airgap-bundle-win/
 
-          test -f /tmp/airgap-bundle/ollama/OllamaSetup.exe
-          test -d /tmp/airgap-bundle/model/blobs
-          test -d /tmp/airgap-bundle/model/manifests
-          test -f /tmp/airgap-bundle/install-offline.ps1
-          test -d /tmp/airgap-bundle/aider
-          test -d /tmp/airgap-bundle/python
+          test -f /tmp/airgap-bundle-win/ollama/OllamaSetup.exe
+          test -d /tmp/airgap-bundle-win/model/blobs
+          test -d /tmp/airgap-bundle-win/model/manifests
+          test -f /tmp/airgap-bundle-win/install-offline.ps1
+          test -d /tmp/airgap-bundle-win/aider
+          test -d /tmp/airgap-bundle-win/python
 
           echo "=== Bundle size ==="
-          du -sh /tmp/airgap-bundle/
-          du -sh /tmp/airgap-bundle/*/
+          du -sh /tmp/airgap-bundle-win/
+          du -sh /tmp/airgap-bundle-win/*/
 
-      # Note: We skip running install-offline.ps1 on CI because it requires
-      # Administrator privileges (#Requires -RunAsAdministrator) and would
-      # re-install Ollama/Python over the runner's existing installation.
-      # The Linux offline-install test above validates the install logic.
       - name: Validate install-offline.ps1 syntax
         shell: pwsh
         run: |
-          # Find the generated install script in the bundle
-          $scriptPath = Get-ChildItem -Path "$env:TEMP", "C:\tmp", "D:\" -Filter "install-offline.ps1" -Recurse -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-          if (-not $scriptPath) {
-            # Git Bash /tmp maps to a msys path — search broadly
-            $scriptPath = Get-ChildItem -Path "C:\" -Filter "install-offline.ps1" -Recurse -Depth 5 -ErrorAction SilentlyContinue |
-              Select-Object -First 1
-          }
-          if (-not $scriptPath) {
-            Write-Error "install-offline.ps1 not found in bundle"
-            exit 1
-          }
-          Write-Host "Found: $($scriptPath.FullName)"
           $errors = $null
           [System.Management.Automation.Language.Parser]::ParseFile(
-            $scriptPath.FullName,
+            "/tmp/airgap-bundle-win/install-offline.ps1",
             [ref]$null,
             [ref]$errors
           )
